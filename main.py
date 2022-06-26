@@ -15,6 +15,7 @@ import pandas as pd
 import numpy as np
 import pathlib
 import os
+from torchvision.models import resnet18
 from sklearn import preprocessing
 warnings.filterwarnings('ignore')
 
@@ -78,31 +79,39 @@ def run():
                                            transforms.ToTensor(),
                                            transforms.Normalize([0.5, 0.5, 0.5],[0.5, 0.5, 0.5])])
 
+    model = resnet18(pretrained = True)
+    print(model)
+    model.fc = nn.Sequential(
+        nn.Linear(512, 256)
+    )
     # DataLoader
     train_dataset = CustomDataset(root_dir,X_train, y_train, train_transforms)
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=num_workers)
-
-    for batch_idx, data in enumerate(tqdm(train_loader, total=len(train_loader))):
-        images, targets, image_id = data
-        patch_dataset = CustomPatchset(images, targets, image_id)
-        patch_loader = DataLoader(patch_dataset, batch_size = PATCH_BATCH_SIZE, shuffle=True, num_workers = num_workers)
-        for batch_idx2, data2 in enumerate(tqdm(patch_loader, total=len(patch_loader), leave = False)):
-            patch_images, patch_target, images_id, patch_ind = data2
-            # print(patch_images.shape)
-            patch_images = torch.reshape(patch_images, (-1, 3, PATCH_SIZE, PATCH_SIZE))
-            patch_target = torch.reshape(patch_target, (-1,))
-            patch_ind = torch.reshape(patch_ind, (-1,))
-            images_id = torch.reshape(images_id, (-1,))
-            
-        gc.collect()
+    model.to(device)
+    for epoch in range(num_epoch):
+        print(f'Epoch: {epoch+1}/{num_epoch}')
+        for batch_idx, data in enumerate(tqdm(train_loader, total=len(train_loader))):
+            images, targets, image_id = data
+            patch_dataset = CustomPatchset(images, targets, image_id)
+            patch_loader = DataLoader(patch_dataset, batch_size = PATCH_BATCH_SIZE, shuffle=True, num_workers = num_workers)
+            for batch_idx2, data2 in enumerate(tqdm(patch_loader, total=len(patch_loader), leave = False)):
+                patch_images, patch_target, images_id, patch_ind = data2
+                patch_images = torch.reshape(patch_images, (-1, 3, PATCH_SIZE, PATCH_SIZE))
+                patch_target = torch.reshape(patch_target, (-1,))
+                patch_ind = torch.reshape(patch_ind, (-1,))
+                images_id = torch.reshape(images_id, (-1,))
+                output = model(patch_images)
+                # print(output.shape)
+                gc.collect()
 
 if __name__ == "__main__":
     base_path = pathlib.Path().absolute()
     image_size = 1024
+    num_epoch = 1
     BATCH_SIZE = 4
     SEED = 42
     PATCH_SIZE = 256
-    PATCH_BATCH_SIZE = 16
+    PATCH_BATCH_SIZE = 3
     stride = 64
     num_patches = ((image_size-PATCH_SIZE)//stride)+1
     num_workers = 2
