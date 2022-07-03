@@ -15,8 +15,10 @@ import pandas as pd
 import numpy as np
 import pathlib
 import os
+import sys
 from torchvision.models import resnet18
 from sklearn import preprocessing
+import matplotlib.pyplot as plt
 warnings.filterwarnings('ignore')
 
 # Seeding to help make results reproduceable
@@ -27,6 +29,27 @@ def seed_everything(seed):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
+class CNNModel(nn.Module):
+    def __init__ (self):
+        super(CNNModel,self).__init__()            
+        self.cnn1=nn.Sequential(
+        nn.Conv2d(256,256,(3,3),2),
+        nn.ReLU(),
+        nn.BatchNorm2d(256),
+        nn.Conv2d(256,256,(3,3), 1),
+        nn.ReLU(),
+        nn.BatchNorm2d(256),
+        nn.Conv2d(256,256,(3,3), 1),
+        nn.ReLU(),
+        nn.BatchNorm2d(256),
+        nn.Flatten(),
+        nn.Linear(1024,128),
+        nn.ReLU(),
+        nn.Linear(128,28)
+    )
+    def forward(self,x):
+        out=self.cnn1(x)
+        return out
 # Building custom dataset
 class CustomDataset(Dataset):
     def __init__(self, root_dir, X_train, y_train, transform):
@@ -68,7 +91,7 @@ def run():
     torch.cuda.empty_cache()
     seed_everything(SEED)
     train_df = pd.read_csv(train_csv_path)
-    # train_df = train_df.sample(8)
+    train_df = train_df.sample(8)
     X_train = train_df['id']
     y_train = train_df['digit_sum']
     le.fit(X_train)
@@ -80,30 +103,85 @@ def run():
                                            transforms.Normalize([0.5, 0.5, 0.5],[0.5, 0.5, 0.5])])
 
     model = resnet18(pretrained = True)
-    print(model)
+    # print(model)
     model.fc = nn.Sequential(
         nn.Linear(512, 256)
     )
+    model1 = CNNModel()
+    # print(model1)
     # DataLoader
     train_dataset = CustomDataset(root_dir,X_train, y_train, train_transforms)
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=num_workers)
-    model.to(device)
+    model = model.to(device)
+    model1 = model1.to(device)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam([
+                {'params': model.parameters()},
+                {'params': model1.parameters(), 'lr': 1e-3}
+            ], lr=learning_rate)
+    scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=gamma_value)
+    
     for epoch in range(num_epoch):
         print(f'Epoch: {epoch+1}/{num_epoch}')
+        correct = 0
+        total = 0
+        losses = []
         for batch_idx, data in enumerate(tqdm(train_loader, total=len(train_loader))):
             images, targets, image_id = data
+            le1.fit(image_id)
+            # print(image_id)
+            L1c = torch.zeros(((len(image_id)),256, num_patches, num_patches), requires_grad = True)
+            L1c = L1c.to(device)
+            L1 = L1c.clone()
             patch_dataset = CustomPatchset(images, targets, image_id)
             patch_loader = DataLoader(patch_dataset, batch_size = PATCH_BATCH_SIZE, shuffle=True, num_workers = num_workers)
+
+            #For filling L1
+            # with torch.no_grad():
+            #     for batch_idx2, data2 in enumerate(tqdm(patch_loader, total=len(patch_loader), leave = False)):
+            #         patch_images, patch_target, images_id, patch_ind = data2
+            #         patch_images = torch.reshape(patch_images, (-1, 3, PATCH_SIZE, PATCH_SIZE))
+            #         patch_target = torch.reshape(patch_target, (-1,))
+            #         patch_ind = torch.reshape(patch_ind, (-1,))
+            #         images_id = torch.reshape(images_id, (-1,))
+            #         patch_images = patch_images.to(device)
+            #         output = model(patch_images)
+            #         images_id = le1.transform(images_id)
+            #         L1[images_id, :, (patch_ind%num_patches),(patch_ind//num_patches)] = output
+            
+            # print("test")
+            # main iterations
             for batch_idx2, data2 in enumerate(tqdm(patch_loader, total=len(patch_loader), leave = False)):
+                # hidden.detach_()
+                
                 patch_images, patch_target, images_id, patch_ind = data2
                 patch_images = torch.reshape(patch_images, (-1, 3, PATCH_SIZE, PATCH_SIZE))
                 patch_target = torch.reshape(patch_target, (-1,))
                 patch_ind = torch.reshape(patch_ind, (-1,))
                 images_id = torch.reshape(images_id, (-1,))
+                patch_images = patch_images.to(device)
                 output = model(patch_images)
+                optimizer.zero_grad()
+                images_id = le1.transform(images_id)
                 # print(output.shape)
-                gc.collect()
+                L1[images_id, :, (patch_ind%num_patches),(patch_ind//num_patches)] = output
+                output = model1(L1)
+                loss = criterion(output, targets)
+                # optimizer.step()
+                loss.backward(retain_graph = False)
 
+                # _, pred = torch.max(output, 1)
+                # correct += (pred == targets).sum().item()
+                # total += pred.size(0)
+                # losses.append(loss.item())
+                # loss.detach()
+                # del loss
+                # gc.collect()
+        scheduler.step()
+        train_loss = np.mean(losses)
+        train_acc = correct * 100.0 / total        
+        print(f'Train Loss: {train_loss}\tTrain Acc: {train_acc}\tLR: {scheduler.get_lr()}',end = '\r')
+        del losses
 if __name__ == "__main__":
     base_path = pathlib.Path().absolute()
     image_size = 1024
@@ -111,11 +189,14 @@ if __name__ == "__main__":
     BATCH_SIZE = 4
     SEED = 42
     PATCH_SIZE = 256
-    PATCH_BATCH_SIZE = 3
+    PATCH_BATCH_SIZE = 32
     stride = 64
+    learning_rate = 0.001
+    gamma_value = 0.9
     num_patches = ((image_size-PATCH_SIZE)//stride)+1
     num_workers = 2
     le = preprocessing.LabelEncoder()
+    le1 = preprocessing.LabelEncoder()
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     root_dir = f"{base_path}/dataset/ultra-mnist_{image_size}/train"
     train_csv_path = f'{base_path}/dataset/ultra-mnist_{image_size}/train.csv'
