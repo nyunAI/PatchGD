@@ -31,25 +31,31 @@ def seed_everything(seed):
 
 class CNNModel(nn.Module):
     def __init__ (self):
-        super(CNNModel,self).__init__()            
+        super(CNNModel,self).__init__()
+        self.cnn0=resnet18(pretrained = True) 
+        self.cnn0.fc = nn.Sequential(
+            nn.Linear(512, 256)
+        )
         self.cnn1=nn.Sequential(
-        nn.Conv2d(256,256,(3,3),2),
-        nn.ReLU(),
-        nn.BatchNorm2d(256),
-        nn.Conv2d(256,256,(3,3), 1),
-        nn.ReLU(),
-        nn.BatchNorm2d(256),
-        nn.Conv2d(256,256,(3,3), 1),
-        nn.ReLU(),
-        nn.BatchNorm2d(256),
-        nn.Flatten(),
-        nn.Linear(1024,128),
-        nn.ReLU(),
-        nn.Linear(128,28)
-    )
-    def forward(self,x):
-        out=self.cnn1(x)
-        return out
+            nn.Conv2d(256,256,(3,3),1),
+            nn.ReLU(),
+            nn.BatchNorm2d(256),
+            nn.Conv2d(256,256,(3,3), 2),
+            nn.ReLU(),
+            nn.BatchNorm2d(256),
+            # nn.Conv2d(256,256,(3,3), 2),
+            # nn.ReLU(),
+            # nn.BatchNorm2d(256),
+            nn.Flatten(),
+            nn.Linear(1024,128),
+            nn.ReLU(),
+            nn.Linear(128,28)
+        )
+    def forward(self,x,L1, images_id, patch_ind):
+        out=self.cnn0(x)
+        L1[images_id, :, (patch_ind%num_patches),(patch_ind//num_patches)] = out
+        out=self.cnn1(L1)
+        return out, L1
 # Building custom dataset
 class CustomDataset(Dataset):
     def __init__(self, root_dir, X_train, y_train, transform):
@@ -91,7 +97,7 @@ def run():
     torch.cuda.empty_cache()
     seed_everything(SEED)
     train_df = pd.read_csv(train_csv_path)
-    train_df = train_df.sample(8)
+    train_df = train_df.sample(80)
     X_train = train_df['id']
     y_train = train_df['digit_sum']
     le.fit(X_train)
@@ -102,23 +108,16 @@ def run():
                                            transforms.ToTensor(),
                                            transforms.Normalize([0.5, 0.5, 0.5],[0.5, 0.5, 0.5])])
 
-    model = resnet18(pretrained = True)
-    # print(model)
-    model.fc = nn.Sequential(
-        nn.Linear(512, 256)
-    )
+    
     model1 = CNNModel()
     # print(model1)
     # DataLoader
     train_dataset = CustomDataset(root_dir,X_train, y_train, train_transforms)
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=num_workers)
-    model = model.to(device)
+    # model = model.to(device)
     model1 = model1.to(device)
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam([
-                {'params': model.parameters()},
-                {'params': model1.parameters(), 'lr': 1e-3}
-            ], lr=learning_rate)
+    optimizer = torch.optim.Adam(model1.parameters(), lr=learning_rate)
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=gamma_value)
     
     for epoch in range(num_epoch):
@@ -128,58 +127,37 @@ def run():
         losses = []
         for batch_idx, data in enumerate(tqdm(train_loader, total=len(train_loader))):
             images, targets, image_id = data
-            le1.fit(image_id)
-            # print(image_id)
+            # le1.fit(image_id)
             L1c = torch.zeros(((len(image_id)),256, num_patches, num_patches), requires_grad = True)
             L1c = L1c.to(device)
             L1 = L1c.clone()
             patch_dataset = CustomPatchset(images, targets, image_id)
             patch_loader = DataLoader(patch_dataset, batch_size = PATCH_BATCH_SIZE, shuffle=True, num_workers = num_workers)
 
-            #For filling L1
-            # with torch.no_grad():
-            #     for batch_idx2, data2 in enumerate(tqdm(patch_loader, total=len(patch_loader), leave = False)):
-            #         patch_images, patch_target, images_id, patch_ind = data2
-            #         patch_images = torch.reshape(patch_images, (-1, 3, PATCH_SIZE, PATCH_SIZE))
-            #         patch_target = torch.reshape(patch_target, (-1,))
-            #         patch_ind = torch.reshape(patch_ind, (-1,))
-            #         images_id = torch.reshape(images_id, (-1,))
-            #         patch_images = patch_images.to(device)
-            #         output = model(patch_images)
-            #         images_id = le1.transform(images_id)
-            #         L1[images_id, :, (patch_ind%num_patches),(patch_ind//num_patches)] = output
-            
-            # print("test")
-            # main iterations
             for batch_idx2, data2 in enumerate(tqdm(patch_loader, total=len(patch_loader), leave = False)):
-                # hidden.detach_()
-                
+
+                for params in model1.parameters():
+                    params.requires_grad = True
+                print("Sum: ", (torch.sum(L1)))
+                L1c.requires_grad = True
+                optimizer.zero_grad()
                 patch_images, patch_target, images_id, patch_ind = data2
                 patch_images = torch.reshape(patch_images, (-1, 3, PATCH_SIZE, PATCH_SIZE))
                 patch_target = torch.reshape(patch_target, (-1,))
                 patch_ind = torch.reshape(patch_ind, (-1,))
                 images_id = torch.reshape(images_id, (-1,))
                 patch_images = patch_images.to(device)
-                output = model(patch_images)
-                optimizer.zero_grad()
                 images_id = le1.transform(images_id)
-                # print(output.shape)
-                L1[images_id, :, (patch_ind%num_patches),(patch_ind//num_patches)] = output
-                output = model1(L1)
+                
+                output, L1 = model1(patch_images, L1, images_id, patch_ind)
+                print("Sum: ", (torch.sum(L1)))
                 loss = criterion(output, targets)
-                # optimizer.step()
+                print("Requires grad:", targets.requires_grad)
                 loss.backward(retain_graph = False)
-
-                # _, pred = torch.max(output, 1)
-                # correct += (pred == targets).sum().item()
-                # total += pred.size(0)
-                # losses.append(loss.item())
-                # loss.detach()
-                # del loss
-                # gc.collect()
+                optimizer.step()
         scheduler.step()
         train_loss = np.mean(losses)
-        train_acc = correct * 100.0 / total        
+        train_acc = correct * 100.0         
         print(f'Train Loss: {train_loss}\tTrain Acc: {train_acc}\tLR: {scheduler.get_lr()}',end = '\r')
         del losses
 if __name__ == "__main__":
@@ -190,11 +168,12 @@ if __name__ == "__main__":
     SEED = 42
     PATCH_SIZE = 256
     PATCH_BATCH_SIZE = 32
-    stride = 64
+    stride = 128
     learning_rate = 0.001
     gamma_value = 0.9
     num_patches = ((image_size-PATCH_SIZE)//stride)+1
-    num_workers = 2
+    print(num_patches)
+    num_workers = 0
     le = preprocessing.LabelEncoder()
     le1 = preprocessing.LabelEncoder()
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
