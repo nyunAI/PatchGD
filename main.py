@@ -51,7 +51,7 @@ class CNNModel(nn.Module):
             nn.ReLU(),
             nn.Linear(128,28)
         )
-    def forward(self,x,L1, images_id, patch_ind):
+    def forward(self, x, L1, images_id, patch_ind):
         out=self.cnn0(x)
         L1[images_id, :, (patch_ind%num_patches),(patch_ind//num_patches)] = out
         out=self.cnn1(L1)
@@ -110,11 +110,8 @@ def run():
 
     
     model1 = CNNModel()
-    # print(model1)
-    # DataLoader
     train_dataset = CustomDataset(root_dir,X_train, y_train, train_transforms)
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=num_workers)
-    # model = model.to(device)
     model1 = model1.to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model1.parameters(), lr=learning_rate)
@@ -127,7 +124,7 @@ def run():
         losses = []
         for batch_idx, data in enumerate(tqdm(train_loader, total=len(train_loader))):
             images, targets, image_id = data
-            # le1.fit(image_id)
+            le1.fit(image_id)
             L1c = torch.zeros(((len(image_id)),256, num_patches, num_patches), requires_grad = True)
             L1c = L1c.to(device)
             L1 = L1c.clone()
@@ -148,10 +145,10 @@ def run():
                 images_id = torch.reshape(images_id, (-1,))
                 patch_images = patch_images.to(device)
                 images_id = le1.transform(images_id)
-                
-                output, L1 = model1(patch_images, L1, images_id, patch_ind)
+                output, L1= model1(patch_images, L1, images_id, patch_ind)
+                print(output.shape, patch_target.shape)
                 print("Sum: ", (torch.sum(L1)))
-                loss = criterion(output, targets)
+                loss = criterion(output, patch_target)
                 print("Requires grad:", targets.requires_grad)
                 loss.backward(retain_graph = False)
                 optimizer.step()
