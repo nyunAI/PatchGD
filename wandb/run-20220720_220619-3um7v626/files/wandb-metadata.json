@@ -1,0 +1,22 @@
+{
+    "os": "Linux-5.15.0-41-generic-x86_64-with-glibc2.35",
+    "python": "3.9.12",
+    "heartbeatAt": "2022-07-20T16:36:22.522967",
+    "startedAt": "2022-07-20T16:36:19.336153",
+    "docker": null,
+    "cpu_count": 8,
+    "cuda": null,
+    "args": [],
+    "state": "running",
+    "program": "/home/akash/Documents/ultracnn/main.py",
+    "codePath": "main.py",
+    "git": {
+        "remote": "https://github.com/transmuteAI/ultracnn.git",
+        "commit": "3d29604ea1e578f23c50313318fc0ec0f021ddac"
+    },
+    "email": "gakash2001@gmail.com",
+    "root": "/home/akash/Documents/ultracnn",
+    "host": "akash-Precision-M4800",
+    "username": "akash",
+    "executable": "/home/akash/anaconda3/bin/python"
+}

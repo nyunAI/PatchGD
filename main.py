@@ -64,12 +64,12 @@ class CNNModel(nn.Module):
         return out, L1cc
 # Building custom dataset
 class CustomDataset(Dataset):
-
     def __init__(self, root_dir, X_train, y_train, transform):
         self.root_dir = root_dir
         self.X_train = X_train
         self.y_train = y_train
         self.transform = transform
+
     def __len__(self):
         return len(self.X_train)
 
@@ -226,12 +226,12 @@ if __name__ == "__main__":
     base_path = pathlib.Path().absolute()
     image_size = 1024
     num_epoch = 20
-    BATCH_SIZE = 8
+    BATCH_SIZE = 2
     SEED = 42
     PATCH_SIZE = 256
-    PATCH_BATCH_SIZE = 32
+    PATCH_BATCH_SIZE = 128
     stride = 64
-    learning_rate = 0.00001
+    learning_rate = 0.001
     gamma_value = 0.9
     num_patches = ((image_size-PATCH_SIZE)//stride)+1
     num_workers = 2
@@ -242,9 +242,9 @@ if __name__ == "__main__":
     }
     le = preprocessing.LabelEncoder()
     le1 = preprocessing.LabelEncoder()
-    run()
     le2 = preprocessing.LabelEncoder()
     device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
     root_dir = f"{base_path}/dataset/ultra-mnist_{image_size}/train"
     train_csv_path = f'{base_path}/dataset/ultra-mnist_{image_size}/train.csv'
     print("Running")
+    run()
