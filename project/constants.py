@@ -1,0 +1,31 @@
+import torch
+
+MONITOR_WANDB = False
+SANITY_CHECK = True
+IMAGE_SIZE = 512
+EPOCHS = 50
+LATENT_DIMENSION = 256
+TRAIN_BATCH_SIZE = 128
+INFER_BATCH_SIZE = 512
+NUM_CLASSES = 28
+SEED = 42
+PATCH_SIZE = 128
+STRIDE = 32
+LEARNING_RATE_BACKBONE = 0.0005
+LEARNING_RATE_HEAD = 0.002
+GAMMA = 0.9
+NUM_PATCHES = ((IMAGE_SIZE-PATCH_SIZE)//STRIDE) + 1
+NUM_WORKERS = 4
+DEVICE = 'cuda:3' if torch.cuda.is_available() else 'cpu'
+ROOT_DIR = '../data/ultramnist_sample/train'
+TRAIN_CSV_PATH = '../data/ultramnist_sample/train.csv'
+PERCENT_SAMPLING = 0.3
+MEAN = [0.5006,0.5006,0.5006]
+STD = [0.4965,0.4965,0.4965]
+EXPERIMENT = f"efficientnetb0_sample_{PERCENT_SAMPLING}_epochs_{EPOCHS}"
+MODEL_SAVE_DIR = './models'
+HISTORY_DIR = './history'
+SPLITS = 10
+
+
+GPUS = 2
