@@ -12,6 +12,8 @@ from models import *
 import numpy as np
 import os
 
+from utils import seed_everything
+
 class CustomModel(pl.LightningModule):
     def __init__(self, 
     train_dataset,
@@ -120,8 +122,8 @@ class CustomModel(pl.LightningModule):
         _,preds = torch.max(outputs,1)
         correct = (preds == y).sum().item()
         num = x.shape[0]
-        self.val_correct += correct
-        self.num_val += num
+        self.val_correct += (preds == y).sum().item()
+        self.num_val += x.shape[0]
         self.log('val_loss_step', loss,sync_dist=True, on_step=True, on_epoch=False)
         self.log('val_accuracy_step', correct/num,sync_dist=True,on_step=True, on_epoch=False)
         self.val_losses.append(loss.item())
@@ -163,12 +165,14 @@ class CustomModel(pl.LightningModule):
         self.log('val_accuracy', val_accuracy,sync_dist=True)
 
 if __name__ == '__main__':
+    seed_everything(42)
+
     os.environ["PL_TORCH_DISTRIBUTED_BACKEND"] = "gloo"
     wandb.login()
     run = wandb.init(project=EXPERIMENT, entity="gowreesh", reinit=True)
 
     train_dataset, val_dataset = get_train_val_dataset()
-    print(f"Length of train data:{len(train_dataset)}, val_data:{len(val_dataset)}")
+    print(f"Length of train data:{len(train_dataset)}, val_data:{len(val_dataset)}, epochs:{EPOCHS}")
     model = CustomModel(train_dataset,val_dataset)
     checkpoint_callback_accuracy = ModelCheckpoint(dirpath=MODEL_SAVE_DIR, filename='best_accuracy_{epoch}-{val_loss:.4f}-{val_accuracy:.4f}', monitor='val_accuracy',mode='max',save_last=True,save_top_k=3)
     checkpoint_callback_loss = ModelCheckpoint(dirpath=MODEL_SAVE_DIR, filename='best_loss_{epoch}-{val_loss:.4f}-{val_accuracy:.4f}', monitor='val_loss',mode='min',save_top_k=3)

@@ -4,7 +4,7 @@ import datetime
 SANITY_CHECK = False
 SCALE_FACTOR = 1
 IMAGE_SIZE = int(SCALE_FACTOR * 512)
-EPOCHS = 5
+EPOCHS = 50
 LATENT_DIMENSION = 256
 BATCH_SIZE = 16
 NUM_CLASSES = 28
@@ -17,18 +17,18 @@ GAMMA = 0.9
 NUM_PATCHES = ((IMAGE_SIZE-PATCH_SIZE)//STRIDE) + 1
 NUM_WORKERS = 4
 ACCELARATOR = 'cuda' if torch.cuda.is_available() else 'cpu'
-ROOT_DIR = '../data/ultramnist_sample/train'
+ROOT_DIR = f'../data/ultra-mnist_{IMAGE_SIZE}/train'
 MNIST_ROOT_DIR = '../data/mnist'
-TRAIN_CSV_PATH = '../data/ultramnist_sample/train.csv'
+TRAIN_CSV_PATH = f'../data/ultra-mnist_{IMAGE_SIZE}/train.csv'
 PERCENT_SAMPLING = 0.3
 MEAN = [0.1307,0.1307,0.1307]
 STD = [0.3081,0.3081,0.3081]
 today = datetime.datetime.now()
-EXPERIMENT = "ultracnn-shared-runs-gowreesh"
-MODEL_SAVE_DIR = './models'
+EXPERIMENT = "ultracnn-shared-runs-gowreesh" if not SANITY_CHECK else 'ultracnn-sanity-gowreesh'
+MODEL_SAVE_DIR = f'./models_{IMAGE_SIZE}'
 SPLITS = 10
 
 
-DEVICES = [4,5]
+DEVICES = [6,7]
 DEVICE_TUNE =[7]
 FIND_BATCH_SIZE = False
