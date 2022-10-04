@@ -12,8 +12,8 @@ def seed_everything(seed):
 
 def get_transforms():
     return transforms.Compose([
-                        transforms.ToPILImage(),
-                        transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
-                        transforms.ToTensor(),
-                        transforms.Normalize(MEAN,STD)])
+                transforms.ToPILImage(),
+                transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
+                transforms.ToTensor(),
+                transforms.Normalize(MEAN,STD)])
     
