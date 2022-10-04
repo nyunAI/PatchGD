@@ -28,7 +28,7 @@ def get_train_val_dataset(print_lengths=False):
     df = pd.read_csv(TRAIN_CSV_PATH)
     df = df.sample(frac=1).reset_index(drop=True)
     if SANITY_CHECK:
-        df = df[:10]
+        df = df[:300]
     df['kfold'] = -1
     kf = KFold(n_splits=SPLITS)
     for fold, (trn_,val_) in enumerate(kf.split(X=df.image_id,y=df.digit_sum)):

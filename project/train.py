@@ -9,6 +9,8 @@ from constants import *
 from dataset_utils import get_train_val_dataset
 from glob import glob
 from models import *
+import numpy as np
+import os
 
 class CustomModel(pl.LightningModule):
     def __init__(self, 
@@ -99,8 +101,12 @@ class CustomModel(pl.LightningModule):
         outputs = self.head(L1)
         loss = self.criterion(outputs,y)
         _,preds = torch.max(outputs,1)
-        self.train_correct += (preds == y).sum().item()
-        self.num_train += x.shape[0]
+        correct = (preds == y).sum().item()
+        num = x.shape[0]
+        self.train_correct += correct
+        self.num_train += num
+        self.log('train_loss_step', loss,sync_dist=True, on_step=True, on_epoch=False)
+        self.log('train_accuracy_step', correct/num,sync_dist=True,on_step=True, on_epoch=False)
         self.train_losses.append(loss.item())
         return loss
         
@@ -112,13 +118,25 @@ class CustomModel(pl.LightningModule):
         outputs = self.head(L1)
         loss = self.criterion(outputs,y)
         _,preds = torch.max(outputs,1)
-        self.val_correct += (preds == y).sum().item()
-        self.num_val += x.shape[0]
+        correct = (preds == y).sum().item()
+        num = x.shape[0]
+        self.val_correct += correct
+        self.num_val += num
+        self.log('val_loss_step', loss,sync_dist=True, on_step=True, on_epoch=False)
+        self.log('val_accuracy_step', correct/num,sync_dist=True,on_step=True, on_epoch=False)
         self.val_losses.append(loss.item())
 
     
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.learning_rate)
+        lrs = {
+            'head': LEARNING_RATE_HEAD,
+            'backbone': LEARNING_RATE_BACKBONE
+        }
+        parameters = [{'params': self.backbone.parameters(),
+                        'lr': lrs['backbone']},
+                        {'params': self.head.parameters(),
+                        'lr': lrs['head']}]
+        optimizer = torch.optim.Adam(parameters)
         scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=self.gamma)
         return [optimizer], [scheduler]
         
@@ -129,9 +147,9 @@ class CustomModel(pl.LightningModule):
     
     def on_train_epoch_end(self):
         train_loss = np.mean(self.train_losses)
-        self.log('train_loss', train_loss,)
+        self.log('train_loss', train_loss,sync_dist=True)
         train_accuracy = self.train_correct/self.num_train
-        self.log('train_accuracy', train_accuracy)
+        self.log('train_accuracy', train_accuracy,sync_dist=True)
 
     def on_validation_epoch_start(self):
         self.val_correct = 0
@@ -140,43 +158,40 @@ class CustomModel(pl.LightningModule):
     
     def on_validation_epoch_end(self):
         val_loss = np.mean(self.val_losses)
-        self.log('val_loss', val_loss)
+        self.log('val_loss', val_loss,sync_dist=True)
         val_accuracy = self.val_correct/self.num_val
-        self.log('val_accuracy', val_accuracy)
+        self.log('val_accuracy', val_accuracy,sync_dist=True)
 
 if __name__ == '__main__':
+    os.environ["PL_TORCH_DISTRIBUTED_BACKEND"] = "gloo"
     wandb.login()
     run = wandb.init(project=EXPERIMENT, entity="gowreesh", reinit=True)
 
     train_dataset, val_dataset = get_train_val_dataset()
+    print(f"Length of train data:{len(train_dataset)}, val_data:{len(val_dataset)}")
     model = CustomModel(train_dataset,val_dataset)
     checkpoint_callback_accuracy = ModelCheckpoint(dirpath=MODEL_SAVE_DIR, filename='best_accuracy_{epoch}-{val_loss:.4f}-{val_accuracy:.4f}', monitor='val_accuracy',mode='max',save_last=True,save_top_k=3)
     checkpoint_callback_loss = ModelCheckpoint(dirpath=MODEL_SAVE_DIR, filename='best_loss_{epoch}-{val_loss:.4f}-{val_accuracy:.4f}', monitor='val_loss',mode='min',save_top_k=3)
-    early_stopping_callback = EarlyStopping(monitor="val_loss", mode="min",patience=10)
+    early_stopping_callback = EarlyStopping(monitor="val_loss", mode="min",patience=15)
     lr_monitor = LearningRateMonitor(logging_interval='step')
     wandb_logger = WandbLogger()
 
-    # Find the max batch size that can be fitted
-    print("Model hyperparams before batch_size tuning =", model.hparams)
+    print("Model hyperparams before tuning =", model.hparams)
+    if FIND_BATCH_SIZE:
+        # Find the max batch size that can be fitted
+        print("Model hyperparams before batch_size tuning =", model.hparams)
 
-    trainer = pl.Trainer(auto_scale_batch_size='binsearch',accelerator=ACCELARATOR,devices=DEVICES,log_every_n_steps=1)
-    tuner = Tuner(trainer)
+        trainer = pl.Trainer(auto_scale_batch_size='binsearch',accelerator=ACCELARATOR,devices=DEVICE_TUNE,log_every_n_steps=1)
+        tuner = Tuner(trainer)
 
-    # Invoke method
-    new_batch_size = tuner.scale_batch_size(model)
-    print("Max Batch size: ",new_batch_size)
-    # Override old batch size (this is done automatically)
-    model.batch_size = new_batch_size
+        # Invoke method
+        new_batch_size = tuner.scale_batch_size(model)
+        print("Max Batch size: ",new_batch_size)
+        # Override old batch size (this is done automatically)
+        model.batch_size = new_batch_size
 
-    print("Model hyperparams after batch_size tuning =",model.hparams)
+        print("Model hyperparams after batch_size tuning =",model.hparams)
 
-    trainer = pl.Trainer(auto_lr_find=True,accelerator=ACCELARATOR,devices=DEVICES,log_every_n_steps=1)
-    lr_finder = trainer.tuner.lr_find(model, num_training=50)
-    # Pick point based on plot, or get suggestion
-    new_lr = lr_finder.suggestion()
-    print("Learning rate found: ",model.learning_rate)
-    # # update hparams of the model
-    model.learning_rate = new_lr
 
     trainer = pl.Trainer(accelerator=ACCELARATOR,
                         devices=DEVICES,
@@ -189,7 +204,6 @@ if __name__ == '__main__':
                                    lr_monitor])
 
 
-
+    trainer.fit(model)
     print(glob(MODEL_SAVE_DIR+'*'))
-
     run.finish()
