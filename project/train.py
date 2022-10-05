@@ -11,7 +11,7 @@ from glob import glob
 from models import *
 import numpy as np
 import os
-
+from train_utils import get_linear_schedule_with_warmup
 from utils import seed_everything
 
 class CustomModel(pl.LightningModule):
@@ -66,10 +66,10 @@ class CustomModel(pl.LightningModule):
         return L1
     
     def train_dataloader(self):
-        return DataLoader(self.train_dataset, batch_size=self.batch_size)
+        return DataLoader(self.train_dataset, batch_size=self.batch_size,pin_memory=True)
     
     def val_dataloader(self):
-        return DataLoader(self.val_dataset, batch_size=self.batch_size)
+        return DataLoader(self.val_dataset, batch_size=self.batch_size,pin_memory=True)
 
     def forward(self, x, print_shape=False):
         L1 = torch.zeros((x.shape[0],self.latent_dim,self.num_patches,self.num_patches),requires_grad=False)
@@ -139,7 +139,7 @@ class CustomModel(pl.LightningModule):
                         {'params': self.head.parameters(),
                         'lr': lrs['head']}]
         optimizer = torch.optim.Adam(parameters)
-        scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=self.gamma)
+        scheduler = get_linear_schedule_with_warmup(optimizer,WARMUP_STEPS,EPOCHS)
         return [optimizer], [scheduler]
         
     def on_train_epoch_start(self):
@@ -202,6 +202,7 @@ if __name__ == '__main__':
                         log_every_n_steps=1,
                         max_epochs=EPOCHS,
                         logger=wandb_logger,
+                        precision=PRECISION,
                         callbacks=[early_stopping_callback,
                                    checkpoint_callback_accuracy,
                                    checkpoint_callback_loss,
