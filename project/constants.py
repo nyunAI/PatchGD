@@ -1,35 +1,37 @@
 import torch
-import datetime
 
 SANITY_CHECK = False
 SCALE_FACTOR = 1
 IMAGE_SIZE = int(SCALE_FACTOR * 512)
-EPOCHS = 50
+EPOCHS = 100
 LATENT_DIMENSION = 256
-BATCH_SIZE = 16
+BATCH_SIZE = 128
 NUM_CLASSES = 28
 SEED = 42
 PATCH_SIZE = int(SCALE_FACTOR * 128)
 STRIDE = int(SCALE_FACTOR * 32)
-LEARNING_RATE_BACKBONE = 0.0005
-LEARNING_RATE_HEAD = 0.001
-WARMUP_STEPS = 2
+LEARNING_RATE_BACKBONE = 0.001
+LEARNING_RATE_HEAD = 0.005
+WARMUP_EPOCHS = 2
 NUM_PATCHES = ((IMAGE_SIZE-PATCH_SIZE)//STRIDE) + 1
-NUM_WORKERS = 4
+NUM_WORKERS = 8
 ACCELARATOR = 'cuda' if torch.cuda.is_available() else 'cpu'
-ROOT_DIR = f'../data/ultra-mnist_{IMAGE_SIZE}/train'
+TRAIN_ROOT_DIR = f'../data/ultramnist_{IMAGE_SIZE}/train'
+VAL_ROOT_DIR = f'../data/ultramnist_{IMAGE_SIZE}/val'
 MNIST_ROOT_DIR = '../data/mnist'
-TRAIN_CSV_PATH = f'../data/ultra-mnist_{IMAGE_SIZE}/train.csv'
+TRAIN_CSV_PATH = f'../data/ultramnist_{IMAGE_SIZE}/train.csv'
+VAL_CSV_PATH = f'../data/ultramnist_{IMAGE_SIZE}/valid.csv'
 PERCENT_SAMPLING = 0.3
 MEAN = [0.1307,0.1307,0.1307]
 STD = [0.3081,0.3081,0.3081]
-today = datetime.datetime.now()
+RUN_NAME = 'resnet18+L1'
+SANITY_DATA_LEN = 300
 EXPERIMENT = "ultracnn-shared-runs-gowreesh" if not SANITY_CHECK else 'ultracnn-sanity-gowreesh'
-MODEL_SAVE_DIR = f'./models_{IMAGE_SIZE}'
+MODEL_SAVE_DIR = f'../models/6_7/{RUN_NAME}_{IMAGE_SIZE}'
 SPLITS = 10
 
 
 DEVICES = [6,7]
 PRECISION = 16
-DEVICE_TUNE =[7]
+DEVICE_TUNE =[6]
 FIND_BATCH_SIZE = False

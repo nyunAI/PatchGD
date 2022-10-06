@@ -23,21 +23,17 @@ class UltraMNISTDataset(Dataset):
 
 
 
-def get_train_val_dataset(print_lengths=False):
+def get_train_val_dataset(print_lengths=True):
     transforms_dataset = get_transforms()
-    df = pd.read_csv(TRAIN_CSV_PATH)
-    df = df.sample(frac=1).reset_index(drop=True)
+    train_df = pd.read_csv(TRAIN_CSV_PATH)
+    train_df = train_df.sample(frac=1).reset_index(drop=True)
+    val_df = pd.read_csv(VAL_CSV_PATH)
+    val_df = val_df.sample(frac=1).reset_index(drop=True)
     if SANITY_CHECK:
-        df = df[:300]
-    df['kfold'] = -1
-    kf = KFold(n_splits=SPLITS)
-    for fold, (trn_,val_) in enumerate(kf.split(X=df.image_id,y=df.digit_sum)):
-        df.loc[val_,'kfold'] = fold
-    train_df = df[(df['kfold']!=0) & (df['kfold']!=1)].reset_index(drop=True)
-    validation_df = df[(df['kfold']==0) | (df['kfold']==1)].reset_index(drop=True)
+        train_df = train_df[:SANITY_DATA_LEN]
+        val_df = val_df[:SANITY_DATA_LEN]
     if print_lengths:
-        print(f"Train set length: {len(train_df)}, validation set length: {len(validation_df)}")
-    
-    train_dataset = UltraMNISTDataset(train_df,ROOT_DIR,transforms_dataset)
-    validation_dataset = UltraMNISTDataset(validation_df,ROOT_DIR,transforms_dataset)
+        print(f"Train set length: {len(train_df)}, validation set length: {len(val_df)}")
+    train_dataset = UltraMNISTDataset(train_df,TRAIN_ROOT_DIR,transforms_dataset)
+    validation_dataset = UltraMNISTDataset(val_df,VAL_ROOT_DIR,transforms_dataset)
     return train_dataset, validation_dataset

@@ -1,13 +1,13 @@
 import torch.nn  as nn
-import timm
+from torchvision.models import resnet18
 from constants import *
 
 
 class Backbone(nn.Module):
     def __init__(self):
         super(Backbone,self).__init__()
-        self.encoder = timm.create_model('efficientnet_b0',pretrained=True)
-        self.encoder.classifier = nn.Linear(1280,256)
+        self.encoder = resnet18(pretrained=True)
+        self.encoder.fc = nn.Linear(512,256)
     def forward(self,x):
         return self.encoder(x)
  

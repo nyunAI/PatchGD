@@ -11,8 +11,11 @@ from glob import glob
 from models import *
 import numpy as np
 import os
-from train_utils import get_linear_schedule_with_warmup
 from utils import seed_everything
+import torch.nn as nn
+import transformers
+
+
 
 class CustomModel(pl.LightningModule):
     def __init__(self, 
@@ -25,14 +28,13 @@ class CustomModel(pl.LightningModule):
     stride=STRIDE, 
     num_classes=NUM_CLASSES,
     batch_size=BATCH_SIZE,
-    learning_rate=1e-3,
-    gamma=GAMMA):
+    learning_rate=1e-3
+    ):
         super().__init__()
         # Constants:
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset
         self.learning_rate = learning_rate
-        self.gamma = gamma
         self.latent_dim = latent_dim
         self.sampling_fraction = sampling_fraction
         self.image_size = image_size
@@ -134,13 +136,17 @@ class CustomModel(pl.LightningModule):
             'head': LEARNING_RATE_HEAD,
             'backbone': LEARNING_RATE_BACKBONE
         }
+
         parameters = [{'params': self.backbone.parameters(),
                         'lr': lrs['backbone']},
                         {'params': self.head.parameters(),
                         'lr': lrs['head']}]
+        steps_per_epoch = len(self.train_dataset)//(self.batch_size*len(DEVICES))
+        if len(self.train_dataset)%self.batch_size != 0:
+            steps_per_epoch+=1
         optimizer = torch.optim.Adam(parameters)
-        scheduler = get_linear_schedule_with_warmup(optimizer,WARMUP_STEPS,EPOCHS)
-        return [optimizer], [scheduler]
+        scheduler = transformers.get_linear_schedule_with_warmup(optimizer,WARMUP_EPOCHS*steps_per_epoch,EPOCHS*steps_per_epoch)
+        return [optimizer], [{"scheduler": scheduler, "interval": "step", 'frequency':1}]
         
     def on_train_epoch_start(self):
         self.train_correct = 0
@@ -165,18 +171,20 @@ class CustomModel(pl.LightningModule):
         self.log('val_accuracy', val_accuracy,sync_dist=True)
 
 if __name__ == '__main__':
-    seed_everything(42)
+    seed_everything(SEED)
 
     os.environ["PL_TORCH_DISTRIBUTED_BACKEND"] = "gloo"
     wandb.login()
     run = wandb.init(project=EXPERIMENT, entity="gowreesh", reinit=True)
+    wandb.run.name = RUN_NAME
+    wandb.run.save()
 
     train_dataset, val_dataset = get_train_val_dataset()
     print(f"Length of train data:{len(train_dataset)}, val_data:{len(val_dataset)}, epochs:{EPOCHS}")
     model = CustomModel(train_dataset,val_dataset)
     checkpoint_callback_accuracy = ModelCheckpoint(dirpath=MODEL_SAVE_DIR, filename='best_accuracy_{epoch}-{val_loss:.4f}-{val_accuracy:.4f}', monitor='val_accuracy',mode='max',save_last=True,save_top_k=3)
     checkpoint_callback_loss = ModelCheckpoint(dirpath=MODEL_SAVE_DIR, filename='best_loss_{epoch}-{val_loss:.4f}-{val_accuracy:.4f}', monitor='val_loss',mode='min',save_top_k=3)
-    early_stopping_callback = EarlyStopping(monitor="val_loss", mode="min",patience=15)
+    # early_stopping_callback = EarlyStopping(monitor="val_loss", mode="min",patience=15)
     lr_monitor = LearningRateMonitor(logging_interval='step')
     wandb_logger = WandbLogger()
 
@@ -203,7 +211,8 @@ if __name__ == '__main__':
                         max_epochs=EPOCHS,
                         logger=wandb_logger,
                         precision=PRECISION,
-                        callbacks=[early_stopping_callback,
+                        callbacks=[
+                                 # early_stopping_callback,
                                    checkpoint_callback_accuracy,
                                    checkpoint_callback_loss,
                                    lr_monitor])

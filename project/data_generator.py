@@ -119,7 +119,10 @@ class CreateUltraMNIST:
         self._generate_samples(os.path.join(self.root_path, 'train'), train_spc)
         df = pd.DataFrame(self.dataframe, columns=['image_id','digit_sum'])
         df.to_csv(f"{self.root_path}/train.csv",index=False)
+        self.dataframe = []
         self._generate_samples(os.path.join(self.root_path, 'val'), val_spc)
+        df = pd.DataFrame(self.dataframe, columns=['image_id','digit_sum'])
+        df.to_csv(f"{self.root_path}/valid.csv",index=False)
  
     def _generate_samples(self, data_path, spc):
         # spc denotes samples per class
@@ -219,10 +222,11 @@ class CreateUltraMNIST:
  
 if __name__ == '__main__':
  
-    ROOT_DIRECTORY = './ultramnist_sample'
-    BASE_DATASET = './mnist'
-    SAMPLES_PER_CLASS = 1000
-    N_SAMPLES = SAMPLES_PER_CLASS * np.array([28,28])
+    ROOT_DIRECTORY = '../data/ultramnist'
+    BASE_DATASET = '../data/mnist'
+    SAMPLES_PER_CLASS_TRAIN = 1000
+    SAMPLES_PER_CLASS_VAL = 200
+    N_SAMPLES = 28 * np.array([SAMPLES_PER_CLASS_TRAIN,SAMPLES_PER_CLASS_VAL])
     IMAGE_SIZE = 4000
  
     obj_umnist = CreateUltraMNIST(root=ROOT_DIRECTORY,
