@@ -28,7 +28,8 @@ class CustomModel(pl.LightningModule):
     stride=STRIDE, 
     num_classes=NUM_CLASSES,
     batch_size=BATCH_SIZE,
-    learning_rate=1e-3
+    learning_rate=1e-3,
+    baseline=BASELINE
     ):
         super().__init__()
         # Constants:
@@ -40,14 +41,16 @@ class CustomModel(pl.LightningModule):
         self.image_size = image_size
         self.patch_size = patch_size
         self.stride = stride
+        self.baseline=baseline
         self.num_patches = ((self.image_size-self.patch_size)//self.stride) + 1
         # Backbone and Head
         self.backbone = Backbone()
-        self.head = CNN_Block()
         for param in self.backbone.parameters():
             param.requires_grad = True
-        for param in self.head.parameters():
-            param.requires_grad = True
+        if not self.baseline:
+            self.head = CNN_Block()
+            for param in self.head.parameters():
+                param.requires_grad = True
         self.criterion = nn.CrossEntropyLoss()
         self.train_losses = []
         self.val_losses = []
@@ -74,35 +77,38 @@ class CustomModel(pl.LightningModule):
         return DataLoader(self.val_dataset, batch_size=self.batch_size,pin_memory=True)
 
     def forward(self, x, print_shape=False):
-        L1 = torch.zeros((x.shape[0],self.latent_dim,self.num_patches,self.num_patches),requires_grad=False)
-        L1 = L1.type_as(x)
-        L1 = self.forward_no_grad_fill(x,L1)
-        with torch.no_grad():
+        if self.baseline:
+            return self.backbone(x)
+        else:
+            L1 = torch.zeros((x.shape[0],self.latent_dim,self.num_patches,self.num_patches),requires_grad=False)
+            L1 = L1.type_as(x)
+            L1 = self.forward_no_grad_fill(x,L1)
             out = L1
             for layer in self.head:
                 out = layer(out)
                 if print_shape:
                     print(out.size())
-        return out
+            return out
     
     def training_step(self, train_batch, batch_idx):
         x, y = train_batch
+        if self.baseline:
+            outputs = self.backbone(x)
+        else:
+            L1 = torch.zeros((x.shape[0],self.latent_dim,self.num_patches,self.num_patches),requires_grad=False)
+            L1 = L1.type_as(x)
+            L1 = self.forward_no_grad_fill(x,L1)
+            
+            patches = self.num_patches**2
+            sampled = np.random.choice(patches, int(self.sampling_fraction*patches),replace=False)
 
-        L1 = torch.zeros((x.shape[0],self.latent_dim,self.num_patches,self.num_patches),requires_grad=False)
-        L1 = L1.type_as(x)
-        L1 = self.forward_no_grad_fill(x,L1)
-        
-        patches = self.num_patches**2
-        sampled = np.random.choice(patches, int(self.sampling_fraction*patches),replace=False)
-
-        for choice in sampled:
-            i = choice%self.num_patches
-            j = choice//self.num_patches
-            patch = x[:,:,self.stride*i:self.stride*i+self.patch_size,self.stride*j:self.stride*j+self.patch_size]
-            out = self.backbone(patch)
-            L1[:,:,i,j] = out
-        
-        outputs = self.head(L1)
+            for choice in sampled:
+                i = choice%self.num_patches
+                j = choice//self.num_patches
+                patch = x[:,:,self.stride*i:self.stride*i+self.patch_size,self.stride*j:self.stride*j+self.patch_size]
+                out = self.backbone(patch)
+                L1[:,:,i,j] = out
+            outputs = self.head(L1)
         loss = self.criterion(outputs,y)
         _,preds = torch.max(outputs,1)
         correct = (preds == y).sum().item()
@@ -116,16 +122,19 @@ class CustomModel(pl.LightningModule):
         
     def validation_step(self, val_batch, batch_idx):
         x, y = val_batch
-        L1 = torch.zeros((x.shape[0],self.latent_dim,self.num_patches,self.num_patches),requires_grad=False)
-        L1 = L1.type_as(x)
-        L1 = self.forward_no_grad_fill(x,L1)
-        outputs = self.head(L1)
+        if self.baseline:
+            outputs = self.backbone(x)
+        else:
+            L1 = torch.zeros((x.shape[0],self.latent_dim,self.num_patches,self.num_patches),requires_grad=False)
+            L1 = L1.type_as(x)
+            L1 = self.forward_no_grad_fill(x,L1)
+            outputs = self.head(L1)
         loss = self.criterion(outputs,y)
         _,preds = torch.max(outputs,1)
         correct = (preds == y).sum().item()
         num = x.shape[0]
-        self.val_correct += (preds == y).sum().item()
-        self.num_val += x.shape[0]
+        self.val_correct += correct
+        self.num_val += num
         self.log('val_loss_step', loss,sync_dist=True, on_step=True, on_epoch=False)
         self.log('val_accuracy_step', correct/num,sync_dist=True,on_step=True, on_epoch=False)
         self.val_losses.append(loss.item())
@@ -136,15 +145,19 @@ class CustomModel(pl.LightningModule):
             'head': LEARNING_RATE_HEAD,
             'backbone': LEARNING_RATE_BACKBONE
         }
-
-        parameters = [{'params': self.backbone.parameters(),
-                        'lr': lrs['backbone']},
-                        {'params': self.head.parameters(),
-                        'lr': lrs['head']}]
         steps_per_epoch = len(self.train_dataset)//(self.batch_size*len(DEVICES))
         if len(self.train_dataset)%self.batch_size != 0:
             steps_per_epoch+=1
-        optimizer = torch.optim.Adam(parameters)
+        if self.baseline:
+            parameters = [{'params': self.backbone.parameters(),
+                            'lr': lrs['backbone']}]
+            optimizer = torch.optim.Adam(parameters)
+        else:
+            parameters = [{'params': self.backbone.parameters(),
+                            'lr': lrs['backbone']},
+                            {'params': self.head.parameters(),
+                            'lr': lrs['head']}]  
+            optimizer = torch.optim.Adam(parameters)
         scheduler = transformers.get_linear_schedule_with_warmup(optimizer,WARMUP_EPOCHS*steps_per_epoch,EPOCHS*steps_per_epoch)
         return [optimizer], [{"scheduler": scheduler, "interval": "step", 'frequency':1}]
         
