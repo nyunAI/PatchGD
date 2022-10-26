@@ -211,6 +211,7 @@ if __name__ == "__main__":
  
     print(f"Number of patches in one dimenstion: {NUM_PATCHES}, percentage sampling is: {PERCENT_SAMPLING}")
     print(RUN_NAME)
+    print(ACCELARATOR)
     
     criterion = nn.CrossEntropyLoss()
     lrs = {
