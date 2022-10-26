@@ -1,4 +1,6 @@
 from random import seed, shuffle
+from tabnanny import check
+from tracemalloc import start
 import warnings
 from tqdm import tqdm
 from torchvision import transforms
@@ -104,7 +106,7 @@ class Backbone(nn.Module):
 class CNN_Block(nn.Module):
     def __init__(self,latent_dim,num_classes):
         super(CNN_Block,self).__init__()
-        self.expected_dim = (BATCH_SIZE,latent_dim,NUM_PATCHES,NUM_PATCHES)
+        self.expected_dim = (1,latent_dim,NUM_PATCHES,NUM_PATCHES)
         self.conv_layers = nn.Sequential(
             nn.Conv2d(latent_dim,128,3,2,2), 
             nn.ReLU(),
@@ -138,7 +140,6 @@ class CNN_Block(nn.Module):
 if __name__ == "__main__":
 
     MONITOR_WANDB = True
-    BASELINE = False
     SANITY_CHECK = False
     EPOCHS = 100
     LEARNING_RATE = 0.001
@@ -146,14 +147,17 @@ if __name__ == "__main__":
     PERCENT_SAMPLING = 0.3
     BATCH_SIZE = 6
     RUN_NAME = f'2-2048-script-resnet50+L1-{PERCENT_SAMPLING}-{BATCH_SIZE}-16gb-repeated_patch=stride=256-modified_large_head'
-
-    
+    SAVE_MODELS = False
+    REPEATED_SAMPLING = False
     SCALE_FACTOR = 4
     IMAGE_SIZE = int(SCALE_FACTOR * 512)
+    PATCH_SIZE = 256
+
+
+    
     LATENT_DIMENSION = 256
     NUM_CLASSES = 28
     SEED = 42
-    PATCH_SIZE = 256
     LEARNING_RATE_BACKBONE = LEARNING_RATE
     LEARNING_RATE_HEAD = LEARNING_RATE
     WARMUP_EPOCHS = 2
@@ -171,17 +175,20 @@ if __name__ == "__main__":
     date_time = now.strftime("%d_%m_%Y__%H_%M")
     SANITY_DATA_LEN = 512
     EXPERIMENT = "ultracnn-shared-runs-gowreesh" if not SANITY_CHECK else 'ultracnn-sanity-gowreesh'
-    MODEL_SAVE_DIR = f'../models/4_5/{date_time}_{RUN_NAME}_{IMAGE_SIZE}' if not SANITY_CHECK else f'../models/4_5/sanity/{date_time}_{RUN_NAME}_{IMAGE_SIZE}'
+    MODEL_SAVE_DIR = f"../models/{'sanity' if SANITY_CHECK else 'runs'}/{date_time}_{RUN_NAME}"
     DECAY_FACTOR = 1
+    VALIDATION_EVERY = 1
+    BASELINE = False
+    CONINUE_FROM_LAST = False
 
-   
     if MONITOR_WANDB:
         run = wandb.init(project=EXPERIMENT, entity="gowreesh", reinit=True)
         wandb.run.name = RUN_NAME
         wandb.run.save()
  
     seed_everything(SEED)
- 
+    if SAVE_MODELS:
+        os.makedirs(MODEL_SAVE_DIR,exist_ok=True)
     
     train_dataset, val_dataset = get_train_val_dataset()
     train_loader = DataLoader(train_dataset,batch_size=BATCH_SIZE,shuffle=True,num_workers=NUM_WORKERS)
@@ -203,7 +210,7 @@ if __name__ == "__main__":
         param.requires_grad = True
  
     print(f"Number of patches in one dimenstion: {NUM_PATCHES}, percentage sampling is: {PERCENT_SAMPLING}")
-    
+    print(RUN_NAME)
     
     criterion = nn.CrossEntropyLoss()
     lrs = {
@@ -227,9 +234,17 @@ if __name__ == "__main__":
  
     best_validation_loss = float('inf')
     best_validation_accuracy = 0
- 
- 
-    for epoch in range(EPOCHS):
+    
+    start_epoch = 0
+    if CONINUE_FROM_LAST:
+        checkpoint = torch.load(f"{MODEL_SAVE_DIR}/last_epoch.pt")
+        start_epoch = checkpoint['epoch']
+        print(f"Model already trained for {start_epoch} epochs.")
+        model1.load_state_dict(checkpoint['model1_weights'])
+        model2.load_state_dict(checkpoint['model2_weights'])
+        optimizer.load_state_dict(checkpoint['optimizer_state'])
+
+    for epoch in range(start_epoch,start_epoch+EPOCHS):
         print("="*31)
         print(f"{'-'*10} Epoch {epoch+1}/{EPOCHS} {'-'*10}")
 
@@ -255,7 +270,7 @@ if __name__ == "__main__":
             L1 = L1.to(ACCELARATOR)
 
             patch_dataset = PatchDataset(images,NUM_PATCHES,STRIDE,PATCH_SIZE)
-            patch_loader = DataLoader(patch_dataset,batch_size=int(len(patch_dataset)*PERCENT_SAMPLING),shuffle=False)
+            patch_loader = DataLoader(patch_dataset,batch_size=int(len(patch_dataset)*PERCENT_SAMPLING),shuffle=True)
 
             # Initial filling without gradient engine:
             
@@ -270,11 +285,6 @@ if __name__ == "__main__":
                     col_idx = idxs%NUM_PATCHES
                     L1[:,:,row_idx,col_idx] = out
                     
-            
-
-            if torch.isnan(L1).any():
-                print("L1 has nan")
-
             
             train_loss_sub_epoch = 0
             for patches,idxs in patch_loader:
@@ -293,6 +303,8 @@ if __name__ == "__main__":
                 loss.backward()
                 optimizer.step()
                 train_loss_sub_epoch += loss.item()
+                if not REPEATED_SAMPLING:
+                    break
             scheduler.step()
 
 
@@ -316,9 +328,7 @@ if __name__ == "__main__":
  
  
         # Evaluation Loop!
-        val_accr = 0.0
-        val_lossr = 0.0
-        if (epoch+1)%1 == 0:
+        if (epoch+1)%VALIDATION_EVERY == 0:
  
             model1.eval()
             model2.eval()
@@ -347,14 +357,6 @@ if __name__ == "__main__":
                             row_idx = idxs//NUM_PATCHES
                             col_idx = idxs%NUM_PATCHES
                             L1[:,:,row_idx,col_idx] = out
-                        
-                
-
-                    if torch.isnan(L1).any():
-                        print("L1 has nan")
-                    outputs = model2(L1)
-                    if torch.isnan(outputs).any():
-                        print("L1 has nan")
                     num_val += labels.shape[0]
                     _,preds = torch.max(outputs,1)
                     val_correct += (preds == labels).sum().item()
@@ -363,10 +365,47 @@ if __name__ == "__main__":
                     l = loss.item()
                     running_loss_val += loss.item()
                     if MONITOR_WANDB:
-                        wandb.log({'lr':lr,'val_accuracy_step':correct/batch_size,"val_loss_step":l,'epoch':epoch})
+                        wandb.log({'lr':lr,
+                        'val_accuracy_step':correct/batch_size,
+                        "val_loss_step":l,
+                        'epoch':epoch})
+                
                 print(f"Validation Loss: {running_loss_val/num_val} Validation Accuracy: {val_correct/num_val}")
                 VALIDATION_LOSS.append(running_loss_val/num_val)  
                 VALIDATION_ACCURACY.append(val_correct/num_val)
+                
+                if (running_loss_val/num_val) < best_validation_loss:
+                    best_validation_loss = running_loss_val/num_val
+                    if SAVE_MODELS:
+                        torch.save({
+                        'model1_weights': model1.state_dict(),
+                        'model2_weights': model2.state_dict(),
+                        'optimizer_state': optimizer.state_dict(),
+                        'epoch' : epoch+1,
+                        }, f"{MODEL_SAVE_DIR}/best_val_loss.pt")
+            
+                if (val_correct/num_val) > best_validation_accuracy:
+                    best_validation_accuracy = val_correct/num_val
+                    if SAVE_MODELS:
+                        torch.save({
+                        'model1_weights': model1.state_dict(),
+                        'model2_weights': model2.state_dict(),
+                        'optimizer_state': optimizer.state_dict(),
+                        'epoch' : epoch+1,
+                        }, f"{MODEL_SAVE_DIR}/best_val_accuracy.pt")
         if MONITOR_WANDB:
-             wandb.log({"training_loss": running_loss_train/num_train, "training_accuracy": train_correct/num_train, "validation_loss": running_loss_val/num_val, "validation_accuracy": val_correct/num_val,'epoch':epoch})
+             wandb.log({"training_loss": running_loss_train/num_train, 
+             "training_accuracy": train_correct/num_train, 
+             "validation_loss": running_loss_val/num_val, 
+             "validation_accuracy": val_correct/num_val,
+             'epoch':epoch,
+             'best_loss':best_validation_loss,
+             'best_accuracy':best_validation_accuracy})
         
+        if SAVE_MODELS:
+            torch.save({
+                    'model1_weights': model1.state_dict(),
+                    'model2_weights': model2.state_dict(),
+                    'optimizer_state': optimizer.state_dict(),
+                    'epoch' : epoch+1,
+                    }, f"{MODEL_SAVE_DIR}/last_epoch.pt")
