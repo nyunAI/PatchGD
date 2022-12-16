@@ -15,8 +15,7 @@ import wandb
 import pathlib
 import os
 import time
-import timm
-from torchvision.models import resnet18, resnet50
+from torchvision.models import resnet50
 import matplotlib.pyplot as plt
 from datetime import datetime
 import transformers
@@ -42,7 +41,7 @@ def get_lr(optimizer):
     for param_group in optimizer.param_groups:
         return param_group['lr']
 
-class UltraMNISTDataset(Dataset):
+class PandasDataset(Dataset):
     def __init__(self,df,root_dir,transforms=None):
         self.df = df
         self.root_dir = root_dir
@@ -51,25 +50,25 @@ class UltraMNISTDataset(Dataset):
         return len(self.df)
     def __getitem__(self,index):
         image_id = self.df.iloc[index].image_id
-        digit_sum = self.df.iloc[index].digit_sum
-        image = cv2.imread(f"{self.root_dir}/{image_id}.jpeg")
+        label = self.df.iloc[index].isup_grade
+        image = cv2.imread(f"{self.root_dir}/{image_id}.png")
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         if self.transforms is not None:
             image = self.transforms(image)
-        return image, torch.tensor(digit_sum)
+        return image, torch.tensor(label)
 
 def get_train_val_dataset(print_lengths=True):
     transforms_dataset = get_transforms()
-    train_df = pd.read_csv(TRAIN_CSV_PATH)
-    train_df = train_df.sample(frac=1).reset_index(drop=True)
-    val_df = pd.read_csv(VAL_CSV_PATH)
-    val_df = val_df.sample(frac=1).reset_index(drop=True)
+    df = pd.read_csv(TRAIN_CSV_PATH)
+    train_df = df[df['kfold']!=0]
+    val_df = df[df['kfold']==0]
     if SANITY_CHECK:
         train_df = train_df[:SANITY_DATA_LEN]
         val_df = val_df[:SANITY_DATA_LEN]
     if print_lengths:
         print(f"Train set length: {len(train_df)}, validation set length: {len(val_df)}")
-    train_dataset = UltraMNISTDataset(train_df,TRAIN_ROOT_DIR,transforms_dataset)
-    validation_dataset = UltraMNISTDataset(val_df,VAL_ROOT_DIR,transforms_dataset)
+    train_dataset = PandasDataset(train_df,TRAIN_ROOT_DIR,transforms_dataset)
+    validation_dataset = PandasDataset(val_df,VAL_ROOT_DIR,transforms_dataset)
     return train_dataset, validation_dataset
 
 
@@ -97,32 +96,28 @@ if __name__ == "__main__":
     SANITY_CHECK = False
     EPOCHS = 100
     LEARNING_RATE = 0.001
-    ACCELARATOR = 'cuda:5' if torch.cuda.is_available() else 'cpu'
-    RUN_NAME = f'5-2048-script-resnet50-baseline-bs=1'
-    BATCH_SIZE = 2
-
-    
+    ACCELARATOR = 'cuda:6' if torch.cuda.is_available() else 'cpu'
     SCALE_FACTOR = 4
     IMAGE_SIZE = int(SCALE_FACTOR * 512)
+    BATCH_SIZE = 1
+    RUN_NAME = f'{ACCELARATOR[-1]}-{IMAGE_SIZE}-{BATCH_SIZE}-script-resnet50-baseline-10GB'
+
     LATENT_DIMENSION = 256
-    NUM_CLASSES = 28
+    NUM_CLASSES = 6
     SEED = 42
     LEARNING_RATE_BACKBONE = LEARNING_RATE
     LEARNING_RATE_HEAD = LEARNING_RATE
     WARMUP_EPOCHS = 2
     NUM_WORKERS = 4
-    TRAIN_ROOT_DIR = f'../data/ultramnist_{IMAGE_SIZE//SCALE_FACTOR}/train'
-    VAL_ROOT_DIR = f'../data/ultramnist_{IMAGE_SIZE//SCALE_FACTOR}/val'
-    MNIST_ROOT_DIR = '../data/mnist'
-    TRAIN_CSV_PATH = f'../data/ultramnist_{IMAGE_SIZE//SCALE_FACTOR}/train.csv'
-    VAL_CSV_PATH = f'../data/ultramnist_{IMAGE_SIZE//SCALE_FACTOR}/valid.csv'
-    MEAN = [0.1307,0.1307,0.1307]
-    STD = [0.3081,0.3081,0.3081]
+    TRAIN_ROOT_DIR = f'..\\data\\pandas_dataset\\training_images_{IMAGE_SIZE}'
+    VAL_ROOT_DIR = TRAIN_ROOT_DIR
+    TRAIN_CSV_PATH = f'..\\data\\pandas_dataset\\train_kfold.csv'
+    MEAN = [0.9770, 0.9550, 0.9667]
+    STD = [0.0783, 0.1387, 0.1006]
     now = datetime.now() # current date and time
     date_time = now.strftime("%d_%m_%Y__%H_%M")
     SANITY_DATA_LEN = 512
-    EXPERIMENT = "ultracnn-shared-runs-gowreesh" if not SANITY_CHECK else 'ultracnn-sanity-gowreesh'
-    MODEL_SAVE_DIR = f'../models/4_5/{date_time}_{RUN_NAME}_{IMAGE_SIZE}' if not SANITY_CHECK else f'../models/4_5/sanity/{date_time}_{RUN_NAME}_{IMAGE_SIZE}'
+    EXPERIMENT = "pandas-shared-runs" if not SANITY_CHECK else 'pandas-sanity-gowreesh'
     DECAY_FACTOR = 1
 
    
@@ -139,15 +134,15 @@ if __name__ == "__main__":
     train_loader = DataLoader(train_dataset,batch_size=BATCH_SIZE,shuffle=True,num_workers=NUM_WORKERS)
     validation_loader = DataLoader(val_dataset,batch_size=BATCH_SIZE,shuffle=False,num_workers=NUM_WORKERS)
  
-    print("Train loader check!")
-    for i in train_loader:
-        print(i[0].shape,i[1].shape)
-        break
+    # print("Train loader check!")
+    # for i in train_loader:
+    #     print(i[0].shape,i[1].shape)
+    #     break
  
-    print("Validation loader check!")
-    for i in validation_loader:
-        print(i[0].shape,i[1].shape)
-        break
+    # print("Validation loader check!")
+    # for i in validation_loader:
+    #     print(i[0].shape,i[1].shape)
+    #     break
  
     print(f"Length of train loader: {len(train_loader)},Validation loader: {(len(validation_loader))}")
  
@@ -156,10 +151,11 @@ if __name__ == "__main__":
     for param in model1.parameters():
         param.requires_grad = True
  
+    print(ACCELARATOR)
+    print(RUN_NAME)
  
  
     print(f"Baseline model:")
-    
     
     criterion = nn.CrossEntropyLoss()
     lrs = {
@@ -171,6 +167,9 @@ if __name__ == "__main__":
                     ]
     optimizer = optim.Adam(parameters)
     steps_per_epoch = len(train_dataset)//(BATCH_SIZE)
+
+    if len(train_dataset)%BATCH_SIZE!=0:
+        steps_per_epoch+=1
     scheduler = transformers.get_linear_schedule_with_warmup(optimizer,WARMUP_EPOCHS*steps_per_epoch,EPOCHS*steps_per_epoch)
     
   
