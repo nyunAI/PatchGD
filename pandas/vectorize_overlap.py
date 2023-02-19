@@ -168,11 +168,11 @@ class CNN_Block(nn.Module):
  
 if __name__ == "__main__":
 
-    MONITOR_WANDB = False
+    MONITOR_WANDB = True
     SANITY_CHECK = False
     EPOCHS = 100
     LEARNING_RATE = 1e-3
-    ACCELARATOR = 'cuda:5' if torch.cuda.is_available() else 'cpu'
+    ACCELARATOR = 'cuda:1' if torch.cuda.is_available() else 'cpu'
     PERCENT_SAMPLING = 0.1
     BATCH_SIZE = 15
     PATCH_SIZE = 128
@@ -258,17 +258,17 @@ if __name__ == "__main__":
                     'lr': lrs['backbone']},
                     {'params': model2.parameters(),
                     'lr': lrs['head']}]
-    # optimizer = optim.Adam(parameters)
+    optimizer = optim.Adam(parameters)
     
-    optimizer_backbone = optim.Adam(model1.parameters(),betas=(0.99,0.999))
-    optimizer_head = optim.Adam(model2.parameters())
+    # optimizer_backbone = optim.Adam(model1.parameters())
+    # optimizer_head = optim.Adam(model2.parameters())
 
 
     steps_per_epoch = len(train_dataset)//(BATCH_SIZE)
     if len(train_dataset)%BATCH_SIZE!=0:
         steps_per_epoch+=1
 
-    # scheduler = transformers.get_linear_schedule_with_warmup(optimizer,WARMUP_EPOCHS*steps_per_epoch,DECAY_FACTOR*EPOCHS*steps_per_epoch)
+    scheduler = transformers.get_linear_schedule_with_warmup(optimizer,WARMUP_EPOCHS*steps_per_epoch,DECAY_FACTOR*EPOCHS*steps_per_epoch)
     
     # scheduler = transformers.get_cosine_schedule_with_warmup(optimizer, 
     #                                                      num_warmup_steps=WARMUP_EPOCHS*steps_per_epoch, 
@@ -277,8 +277,8 @@ if __name__ == "__main__":
     # scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer, base_lr=1e-4, max_lr=1e-3,step_size_up=steps_per_epoch//2,mode="triangular",cycle_momentum=False)
     
     
-    scheduler_backbone = transformers.get_linear_schedule_with_warmup(optimizer_backbone,WARMUP_EPOCHS*steps_per_epoch,DECAY_FACTOR*EPOCHS*steps_per_epoch)
-    scheduler_head = transformers.get_linear_schedule_with_warmup(optimizer_head,WARMUP_EPOCHS*steps_per_epoch,DECAY_FACTOR*EPOCHS*steps_per_epoch)
+    # scheduler_backbone = torch.optim.lr_scheduler.CyclicLR(optimizer_backbone, base_lr=1e-5, max_lr=1e-4,step_size_up=steps_per_epoch//2,mode="triangular",cycle_momentum=False)
+    # scheduler_head = torch.optim.lr_scheduler.CyclicLR(optimizer_head, base_lr=1e-4, max_lr=1e-3,step_size_up=steps_per_epoch//2,mode="triangular",cycle_momentum=False)
 
     TRAIN_ACCURACY = []
     TRAIN_LOSS = []
@@ -311,16 +311,16 @@ if __name__ == "__main__":
             labels = labels.to(ACCELARATOR)
             batch_size = labels.shape[0]
             num_train += labels.shape[0]
-            # optimizer.zero_grad()
+            optimizer.zero_grad()
 
-            optimizer_backbone.zero_grad()
-            optimizer_head.zero_grad()
+            # optimizer_backbone.zero_grad()
+            # optimizer_head.zero_grad()
             
             L1 = torch.zeros((batch_size,LATENT_DIMENSION,NUM_PATCHES,NUM_PATCHES))
             L1 = L1.to(ACCELARATOR)
 
             patch_dataset = PatchDataset(images,NUM_PATCHES,STRIDE,PATCH_SIZE)
-            patch_loader = DataLoader(patch_dataset,batch_size=int(len(patch_dataset)*PERCENT_SAMPLING),shuffle=True)
+            patch_loader = DataLoader(patch_dataset,batch_size=int(len(patch_dataset)*PERCENT_SAMPLING/2),shuffle=True)
 
             # Initial filling without gradient engine:
             
@@ -338,35 +338,46 @@ if __name__ == "__main__":
                     
             
             train_loss_sub_epoch = 0
+            prev_patches = None
+            prev_idxs = None
             for inner_iteration, (patches,idxs) in enumerate(patch_loader):
-                # optimizer.zero_grad()
-
-                optimizer_backbone.zero_grad()
-                optimizer_head.zero_grad()
-
-                L1 = L1.detach()
                 patches = patches.to(ACCELARATOR)
                 patches = patches.reshape(-1,3,PATCH_SIZE,PATCH_SIZE)
-                out = model1(patches)
-                out = out.reshape(-1,batch_size, LATENT_DIMENSION)
-                out = torch.permute(out,(1,2,0))
-                row_idx = idxs//NUM_PATCHES
-                col_idx = idxs%NUM_PATCHES
-                L1[:,:,row_idx,col_idx] = out
-                outputs = model2(L1)
-                loss = criterion(outputs,labels)
-                loss.backward()
-                # optimizer.step()
 
-                optimizer_backbone.step()
-                optimizer_head.step()
+                if prev_patches is None and prev_idxs is None:
+                    prev_patches = patches
+                    prev_idxs = idxs
+                    continue
+                else:
+                    optimizer.zero_grad()
 
-                train_loss_sub_epoch += loss.item()
-                if inner_iteration + 1 >= INNER_ITERATION:
-                    break
-            # scheduler.step()
-            scheduler_backbone.step()
-            scheduler_head.step()
+                    # optimizer_backbone.zero_grad()
+                    # optimizer_head.zero_grad()
+                    pass_patches = torch.cat([prev_patches,patches])
+                    pass_idxs = torch.cat([prev_idxs,idxs])
+                    prev_patches = patches
+                    prev_idxs = idxs
+                    L1 = L1.detach()
+                    out = model1(pass_patches)
+                    out = out.reshape(-1,batch_size, LATENT_DIMENSION)
+                    out = torch.permute(out,(1,2,0))
+                    row_idx = pass_idxs//NUM_PATCHES
+                    col_idx = pass_idxs%NUM_PATCHES
+                    L1[:,:,row_idx,col_idx] = out
+                    outputs = model2(L1)
+                    loss = criterion(outputs,labels)
+                    loss.backward()
+                    optimizer.step()
+
+                    # optimizer_backbone.step()
+                    # optimizer_head.step()
+
+                    train_loss_sub_epoch += loss.item()
+                    if inner_iteration + 1 >= INNER_ITERATION:
+                        break
+            scheduler.step()
+            # scheduler_backbone.step()
+            # scheduler_head.step()
 
 
             # Adding all the losses... Can be modified??
@@ -379,11 +390,11 @@ if __name__ == "__main__":
                 correct = (preds == labels).sum().item()
                 train_correct += correct
             
-            # lr = get_lr(optimizer)
+            lr = get_lr(optimizer)
 
 
-            lr = get_lr(optimizer_backbone)
-            lr.extend(get_lr(optimizer_head))
+            # lr = get_lr(optimizer_backbone)
+            # lr.extend(get_lr(optimizer_head))
             
             if MONITOR_WANDB:
                 wandb.log({f"lrs/lr-{ii}":learning_rate for ii,learning_rate in enumerate(lr)})
@@ -449,8 +460,7 @@ if __name__ == "__main__":
                         torch.save({
                         'model1_weights': model1.state_dict(),
                         'model2_weights': model2.state_dict(),
-                        'optimizer_backbone_state': optimizer_backbone.state_dict(),
-                        'optimizer_head_state': optimizer_head.state_dict(),
+                        'optimizer_state': optimizer.state_dict(),
                         'epoch' : epoch+1,
                         }, f"{MODEL_SAVE_DIR}/best_val_loss.pt")
             
@@ -460,8 +470,7 @@ if __name__ == "__main__":
                         torch.save({
                         'model1_weights': model1.state_dict(),
                         'model2_weights': model2.state_dict(),
-                        'optimizer_backbone_state': optimizer_backbone.state_dict(),
-                        'optimizer_head_state': optimizer_head.state_dict(),
+                        'optimizer_state': optimizer.state_dict(),
                         'epoch' : epoch+1,
                         }, f"{MODEL_SAVE_DIR}/best_val_accuracy.pt")
         if MONITOR_WANDB:
@@ -477,7 +486,6 @@ if __name__ == "__main__":
             torch.save({
                     'model1_weights': model1.state_dict(),
                     'model2_weights': model2.state_dict(),
-                    'optimizer_backbone_state': optimizer_backbone.state_dict(),
-                    'optimizer_head_state': optimizer_head.state_dict(),
+                    'optimizer_state': optimizer.state_dict(),
                     'epoch' : epoch+1,
                     }, f"{MODEL_SAVE_DIR}/last_epoch.pt")

@@ -15,6 +15,7 @@ from sklearn.model_selection import KFold
 import numpy as np
 import wandb
 import pathlib
+from sklearn import metrics
 import os
 import time
 import timm
@@ -90,13 +91,26 @@ def get_train_val_dataset(print_lengths=True):
     validation_dataset = PandasDataset(val_df,VAL_ROOT_DIR,transforms_dataset)
     return train_dataset, validation_dataset
 
+def get_metrics(predictions,actual,isTensor=False):
+    if isTensor:
+        p = predictions.detach().cpu().numpy()
+        a = actual.detach().cpu().numpy()
+    else:
+        p = predictions
+        a = actual
+    kappa_score = metrics.cohen_kappa_score(a, p, labels=None, weights= 'quadratic', sample_weight=None)
+    accuracy = metrics.accuracy_score(y_pred=p,y_true=a)
+    return {
+        "kappa":  kappa_score,
+        "accuracy": accuracy
+    }
+
 def get_output_shape(model, image_dim):
     return model(torch.rand(*(image_dim))).data.shape
 
 class Backbone(nn.Module):
     def __init__(self,baseline,latent_dim):
         super(Backbone,self).__init__()
-        # self.encoder = timm.create_model('resnet10t',pretrained=True)
         self.encoder = resnet50(pretrained=True)
         if baseline:
             self.encoder.fc = nn.Linear(2048,NUM_CLASSES)
@@ -168,26 +182,35 @@ class CNN_Block(nn.Module):
  
 if __name__ == "__main__":
 
-    MONITOR_WANDB = False
+    DEVICE_ID = 5 ######################################
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(DEVICE_ID)
+    now = datetime.now() 
+    date_time = now.strftime("%d_%m_%Y__%H_%M")
+    MAIN_RUN = True
+
+    MONITOR_WANDB = True ######################################
     SANITY_CHECK = False
     EPOCHS = 100
     LEARNING_RATE = 1e-3
-    ACCELARATOR = 'cuda:5' if torch.cuda.is_available() else 'cpu'
-    PERCENT_SAMPLING = 0.1
-    BATCH_SIZE = 15
-    PATCH_SIZE = 128
+    ACCELARATOR = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+    PERCENT_SAMPLING = 1/8 ######################################
+    GRAD_ACCUM =  not True
+    BATCH_SIZE = 196 ######################################
+    MEMORY = '16' ######################################
+    PATCH_SIZE = 32
     SAVE_MODELS = MONITOR_WANDB
-    SCALE_FACTOR = 4
+    SCALE_FACTOR = 1 ######################################
     IMAGE_SIZE = 512*SCALE_FACTOR
     WARMUP_EPOCHS = 2
-    EXPERIMENT = "pandas-shared-runs" if not SANITY_CHECK else 'pandas-sanity-gowreesh'
-    # EXPERIMENT = "ultracnn-lr-tuning" if not SANITY_CHECK else 'ultracnn-sanity'
+    EXPERIMENT = "pandas-shared-runs-icml-rebuttal" if not SANITY_CHECK else 'pandas-sanity-gowreesh'
     PATCH_BATCHES = math.ceil(1/PERCENT_SAMPLING)
     INNER_ITERATION = PATCH_BATCHES
+    EPSILON = INNER_ITERATION if GRAD_ACCUM else 1 ######################################
     LEARNING_RATE_BACKBONE = LEARNING_RATE
     LEARNING_RATE_HEAD = LEARNING_RATE
-    RUN_NAME = f"{ACCELARATOR[-1]}-{IMAGE_SIZE}-heirarchical-resnet50+L1-{PERCENT_SAMPLING}-{BATCH_SIZE}-inner_iteration={INNER_ITERATION}_patch=stride={PATCH_SIZE}-linear_warmup={WARMUP_EPOCHS}-16-GB"
-    # RUN_NAME = f'{ACCELARATOR[-1]}_cyclic_different'
+    FEATURE = f"{'grad_accumulation' if EPSILON == INNER_ITERATION else ''}" ######################################
+    RUN_NAME = f'{DEVICE_ID}-{IMAGE_SIZE}_{PATCH_SIZE}-{PERCENT_SAMPLING}-bs-{BATCH_SIZE}-resnet50+head-{MEMORY}-{FEATURE}-datetime_{date_time}' ######################################
+    
     
     LATENT_DIMENSION = 256
     NUM_CLASSES = 6
@@ -200,15 +223,13 @@ if __name__ == "__main__":
     TRAIN_CSV_PATH = f'..\\data\\pandas_dataset\\train_kfold.csv'
     MEAN = [0.9770, 0.9550, 0.9667]
     STD = [0.0783, 0.1387, 0.1006]
-    now = datetime.now() # current date and time
-    date_time = now.strftime("%d_%m_%Y__%H_%M")
     SANITY_DATA_LEN = None
-    MODEL_SAVE_DIR = f"../models/{'sanity' if SANITY_CHECK else 'runs'}/{date_time}_{RUN_NAME}"
-    DECAY_FACTOR = 1
+    MODEL_SAVE_DIR = f"../{'models_icml' if MAIN_RUN else 'models'}/{'sanity' if SANITY_CHECK else 'runs'}/{RUN_NAME}"
+    DECAY_FACTOR = 2
     VALIDATION_EVERY = 1
     BASELINE = False
-    CONINUE_FROM_LAST = True
-    MODEL_LOAD_DIR = '../models/runs/13_12_2022__13_32_4-512-heirarchical-resnet50+L1-0.3-105-inner_iteration=4_patch=stride=128-linear_warmup=2'
+    CONINUE_FROM_LAST = False ######################################
+    MODEL_LOAD_DIR = '' ######################################
 
     if MONITOR_WANDB:
         run = wandb.init(project=EXPERIMENT, entity="gowreesh", reinit=True)
@@ -229,13 +250,6 @@ if __name__ == "__main__":
     model1 = Backbone(baseline=False,latent_dim=256)
     model2 = CNN_Block(LATENT_DIMENSION,NUM_CLASSES,NUM_PATCHES)
  
-    if CONINUE_FROM_LAST:
-        checkpoint = torch.load(f"{MODEL_LOAD_DIR}/last_epoch.pt")
-        start_epoch = checkpoint['epoch']
-        print(f"Model already trained for {start_epoch} epochs on 512 size images.")
-        model1.load_state_dict(checkpoint['model1_weights'])
-        # model1.encoder.fc = nn.Linear(2048,LATENT_DIMENSION)
-        # print("512 weights backbone loaded with latent modified!!")
 
     model1.to(ACCELARATOR)
     for param in model1.parameters():
@@ -258,18 +272,17 @@ if __name__ == "__main__":
                     'lr': lrs['backbone']},
                     {'params': model2.parameters(),
                     'lr': lrs['head']}]
-    # optimizer = optim.Adam(parameters)
+    optimizer = optim.Adam(parameters)
     
-    optimizer_backbone = optim.Adam(model1.parameters(),betas=(0.99,0.999))
-    optimizer_head = optim.Adam(model2.parameters())
+    # optimizer_backbone = optim.Adam(model1.parameters())
+    # optimizer_head = optim.Adam(model2.parameters())
 
 
     steps_per_epoch = len(train_dataset)//(BATCH_SIZE)
     if len(train_dataset)%BATCH_SIZE!=0:
         steps_per_epoch+=1
 
-    # scheduler = transformers.get_linear_schedule_with_warmup(optimizer,WARMUP_EPOCHS*steps_per_epoch,DECAY_FACTOR*EPOCHS*steps_per_epoch)
-    
+    scheduler = transformers.get_linear_schedule_with_warmup(optimizer,WARMUP_EPOCHS*steps_per_epoch,DECAY_FACTOR*EPOCHS*steps_per_epoch)
     # scheduler = transformers.get_cosine_schedule_with_warmup(optimizer, 
     #                                                      num_warmup_steps=WARMUP_EPOCHS*steps_per_epoch, 
     #                                                      num_training_steps=DECAY_FACTOR*EPOCHS*steps_per_epoch)
@@ -277,21 +290,24 @@ if __name__ == "__main__":
     # scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer, base_lr=1e-4, max_lr=1e-3,step_size_up=steps_per_epoch//2,mode="triangular",cycle_momentum=False)
     
     
-    scheduler_backbone = transformers.get_linear_schedule_with_warmup(optimizer_backbone,WARMUP_EPOCHS*steps_per_epoch,DECAY_FACTOR*EPOCHS*steps_per_epoch)
-    scheduler_head = transformers.get_linear_schedule_with_warmup(optimizer_head,WARMUP_EPOCHS*steps_per_epoch,DECAY_FACTOR*EPOCHS*steps_per_epoch)
+    # scheduler_backbone = torch.optim.lr_scheduler.CyclicLR(optimizer_backbone, base_lr=1e-5, max_lr=1e-4,step_size_up=steps_per_epoch//2,mode="triangular",cycle_momentum=False)
+    # scheduler_head = torch.optim.lr_scheduler.CyclicLR(optimizer_head, base_lr=1e-4, max_lr=1e-3,step_size_up=steps_per_epoch//2,mode="triangular",cycle_momentum=False)
 
-    TRAIN_ACCURACY = []
-    TRAIN_LOSS = []
-    VALIDATION_ACCURACY = []
-    VALIDATION_LOSS = []
- 
+    if CONINUE_FROM_LAST:
+        checkpoint = torch.load(f"{MODEL_LOAD_DIR}/best_val_metric.pt")
+        start_epoch = checkpoint['epoch']
+        print(f"Model already trained for {start_epoch} epochs on 2048 size images.")
+        print(checkpoint.keys())
+        print(model1.load_state_dict(checkpoint['model1_weights']))
+        start_epoch = 0
+    
+
     best_validation_loss = float('inf')
     best_validation_accuracy = 0
+    best_validation_metric = -float('inf')
     
     start_epoch = 0
-
-
-    for epoch in range(start_epoch,start_epoch+EPOCHS):
+    for epoch in range(start_epoch,EPOCHS):
         print("="*31)
         print(f"{'-'*10} Epoch {epoch+1}/{EPOCHS} {'-'*10}")
 
@@ -302,6 +318,13 @@ if __name__ == "__main__":
         num_train = 0
         num_val = 0
        
+        
+        train_predictions = np.array([])
+        train_labels = np.array([])
+
+        val_predictions = np.array([])
+        val_labels = np.array([])
+
  
         model1.train()
         model2.train()
@@ -311,16 +334,15 @@ if __name__ == "__main__":
             labels = labels.to(ACCELARATOR)
             batch_size = labels.shape[0]
             num_train += labels.shape[0]
-            # optimizer.zero_grad()
 
-            optimizer_backbone.zero_grad()
-            optimizer_head.zero_grad()
+            # optimizer_backbone.zero_grad()
+            # optimizer_head.zero_grad()
             
             L1 = torch.zeros((batch_size,LATENT_DIMENSION,NUM_PATCHES,NUM_PATCHES))
             L1 = L1.to(ACCELARATOR)
 
             patch_dataset = PatchDataset(images,NUM_PATCHES,STRIDE,PATCH_SIZE)
-            patch_loader = DataLoader(patch_dataset,batch_size=int(len(patch_dataset)*PERCENT_SAMPLING),shuffle=True)
+            patch_loader = DataLoader(patch_dataset,batch_size=int(math.ceil(len(patch_dataset)*PERCENT_SAMPLING)),shuffle=True)
 
             # Initial filling without gradient engine:
             
@@ -338,35 +360,39 @@ if __name__ == "__main__":
                     
             
             train_loss_sub_epoch = 0
+            optimizer.zero_grad()
             for inner_iteration, (patches,idxs) in enumerate(patch_loader):
-                # optimizer.zero_grad()
 
-                optimizer_backbone.zero_grad()
-                optimizer_head.zero_grad()
+                # optimizer_backbone.zero_grad()
+                # optimizer_head.zero_grad()
 
                 L1 = L1.detach()
                 patches = patches.to(ACCELARATOR)
                 patches = patches.reshape(-1,3,PATCH_SIZE,PATCH_SIZE)
                 out = model1(patches)
                 out = out.reshape(-1,batch_size, LATENT_DIMENSION)
-                out = torch.permute(out,(1,2,0))
+                out = out.permute((1,2,0))
                 row_idx = idxs//NUM_PATCHES
                 col_idx = idxs%NUM_PATCHES
                 L1[:,:,row_idx,col_idx] = out
                 outputs = model2(L1)
                 loss = criterion(outputs,labels)
+                loss = loss/EPSILON
                 loss.backward()
-                # optimizer.step()
-
-                optimizer_backbone.step()
-                optimizer_head.step()
-
                 train_loss_sub_epoch += loss.item()
+
+                if (inner_iteration + 1)%EPSILON==0:
+                    optimizer.step()
+                    optimizer.zero_grad()
+                
+                # optimizer_backbone.step()
+                # optimizer_head.step()
+
                 if inner_iteration + 1 >= INNER_ITERATION:
                     break
-            # scheduler.step()
-            scheduler_backbone.step()
-            scheduler_head.step()
+            scheduler.step()
+            # scheduler_backbone.step()
+            # scheduler_head.step()
 
 
             # Adding all the losses... Can be modified??
@@ -374,24 +400,32 @@ if __name__ == "__main__":
             
             # Using the final L1 to make the final set of predictions for accuracy reporting 
             with torch.no_grad():
-                outs = model2(L1)
+               
                 _,preds = torch.max(outputs,1)
                 correct = (preds == labels).sum().item()
                 train_correct += correct
+
+                train_metrics_step = get_metrics(preds,labels,True)
+                train_predictions = np.concatenate((train_predictions,preds.detach().cpu().numpy()))
+                train_labels = np.concatenate((train_labels,labels.detach().cpu().numpy()))
             
-            # lr = get_lr(optimizer)
+            lr = get_lr(optimizer)
 
 
-            lr = get_lr(optimizer_backbone)
-            lr.extend(get_lr(optimizer_head))
+            # lr = get_lr(optimizer_backbone)
+            # lr.extend(get_lr(optimizer_head))
             
             if MONITOR_WANDB:
                 wandb.log({f"lrs/lr-{ii}":learning_rate for ii,learning_rate in enumerate(lr)})
-                wandb.log({'train_accuracy_step':correct/batch_size,"train_loss_step":train_loss_sub_epoch,'epoch':epoch})
+                wandb.log({
+                "train_loss_step":train_loss_sub_epoch/batch_size,
+                'epoch':epoch,
+                'train_accuracy_step_metric':train_metrics_step['accuracy'],
+                'train_kappa_step_metric':train_metrics_step['kappa']})
 
+        train_metrics = get_metrics(train_predictions,train_labels)
         print(f"Train Loss: {running_loss_train/num_train} Train Accuracy: {train_correct/num_train}")
-        TRAIN_LOSS.append(running_loss_train/num_train)
-        TRAIN_ACCURACY.append(train_correct/num_train)
+        print(f"Train Accuracy Metric: {train_metrics['accuracy']} Train Kappa Metric: {train_metrics['kappa']}")
  
  
         # Evaluation Loop!
@@ -430,18 +464,24 @@ if __name__ == "__main__":
                     _,preds = torch.max(outputs,1)
                     val_correct += (preds == labels).sum().item()
                     correct = (preds == labels).sum().item()
+                    
+                    val_metrics_step = get_metrics(preds,labels,True)
+                    val_predictions = np.concatenate((val_predictions,preds.detach().cpu().numpy()))
+                    val_labels = np.concatenate((val_labels,labels.detach().cpu().numpy()))
+                    
                     loss = criterion(outputs,labels)
                     l = loss.item()
                     running_loss_val += loss.item()
                     if MONITOR_WANDB:
                         wandb.log({f"lrs/lr-{ii}":learning_rate for ii,learning_rate in enumerate(lr)})
-                        wandb.log({'val_accuracy_step':correct/batch_size,
-                        "val_loss_step":l,
-                        'epoch':epoch})
+                        wandb.log({'epoch':epoch,
+                        "val_loss_step":l/batch_size,
+                        'val_accuracy_step_metric':val_metrics_step['accuracy'],
+                        'val_kappa_step_metric':val_metrics_step['kappa']})
                 
+                val_metrics = get_metrics(val_predictions,val_labels)
                 print(f"Validation Loss: {running_loss_val/num_val} Validation Accuracy: {val_correct/num_val}")
-                VALIDATION_LOSS.append(running_loss_val/num_val)  
-                VALIDATION_ACCURACY.append(val_correct/num_val)
+                print(f"Val Accuracy Metric: {val_metrics['accuracy']} Val Kappa Metric: {val_metrics['kappa']}")    
                 
                 if (running_loss_val/num_val) < best_validation_loss:
                     best_validation_loss = running_loss_val/num_val
@@ -449,35 +489,50 @@ if __name__ == "__main__":
                         torch.save({
                         'model1_weights': model1.state_dict(),
                         'model2_weights': model2.state_dict(),
-                        'optimizer_backbone_state': optimizer_backbone.state_dict(),
-                        'optimizer_head_state': optimizer_head.state_dict(),
+                        'optimizer_state': optimizer.state_dict(),
+                        'scheduler_state': scheduler.state_dict(),
                         'epoch' : epoch+1,
                         }, f"{MODEL_SAVE_DIR}/best_val_loss.pt")
             
-                if (val_correct/num_val) > best_validation_accuracy:
-                    best_validation_accuracy = val_correct/num_val
+                if val_metrics['accuracy'] > best_validation_accuracy:
+                    best_validation_accuracy = val_metrics['accuracy']
                     if SAVE_MODELS:
                         torch.save({
                         'model1_weights': model1.state_dict(),
                         'model2_weights': model2.state_dict(),
-                        'optimizer_backbone_state': optimizer_backbone.state_dict(),
-                        'optimizer_head_state': optimizer_head.state_dict(),
+                        'optimizer_state': optimizer.state_dict(),
+                        'scheduler_state': scheduler.state_dict(),
                         'epoch' : epoch+1,
                         }, f"{MODEL_SAVE_DIR}/best_val_accuracy.pt")
+                
+                if val_metrics['kappa'] > best_validation_metric:
+                    best_validation_metric = val_metrics['kappa']
+                    if SAVE_MODELS:
+                        torch.save({
+                        'model1_weights': model1.state_dict(),
+                        'model2_weights': model2.state_dict(),
+                        'optimizer_state': optimizer.state_dict(),
+                        'scheduler_state': scheduler.state_dict(),
+                        'epoch' : epoch+1,
+                        }, f"{MODEL_SAVE_DIR}/best_val_metric.pt")
+
         if MONITOR_WANDB:
-             wandb.log({"training_loss": running_loss_train/num_train, 
-             "training_accuracy": train_correct/num_train, 
+             wandb.log({"training_loss": running_loss_train/num_train,  
              "validation_loss": running_loss_val/num_val, 
-             "validation_accuracy": val_correct/num_val,
+             'training_accuracy_metric': train_metrics['accuracy'],
+             'training_kappa_metric': train_metrics['kappa'],
+             'validation_accuracy_metric': val_metrics['accuracy'],
+             'validation_kappa_metrics': val_metrics['kappa'],
              'epoch':epoch,
              'best_loss':best_validation_loss,
-             'best_accuracy':best_validation_accuracy})
+             'best_accuracy':best_validation_accuracy,
+             'best_metric': best_validation_metric})
         
         if SAVE_MODELS:
             torch.save({
                     'model1_weights': model1.state_dict(),
                     'model2_weights': model2.state_dict(),
-                    'optimizer_backbone_state': optimizer_backbone.state_dict(),
-                    'optimizer_head_state': optimizer_head.state_dict(),
+                    'optimizer_state': optimizer.state_dict(),
+                    'scheduler_state': scheduler.state_dict(),
                     'epoch' : epoch+1,
                     }, f"{MODEL_SAVE_DIR}/last_epoch.pt")

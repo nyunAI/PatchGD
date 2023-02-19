@@ -64,14 +64,25 @@ def get_iou(bb1, bb2):
  
  
 class CreateUltraMNIST:
-    def __init__(self, root: str, base_data_path: str, n_samples: list = [28000, 28000],
-                    img_size: int = 4000, img_scale_fact: list = [1, 76])->None:
+    def __init__(self, 
+                root: str,
+                base_data_path: str, 
+                start_sum=9,
+                end_sum=18,
+                n_samples: list = [28000, 28000],
+                num_classes = 28,
+                img_size: int = 4000,
+                img_scale_fact: list = [1, 10])->None:
+
+        
         self.root_path = root
         self.base_data_path = base_data_path
         self.n_samples = n_samples
         self.img_size = img_size
         self.img_scale_fact = img_scale_fact
-        self.n_classes = 28
+        self.start_sum = start_sum
+        self.end_sum = end_sum 
+        self.n_classes = num_classes
         self.data = None
         self.targets = None
  
@@ -86,16 +97,16 @@ class CreateUltraMNIST:
                 for k in range(10):
                     result = [i, j, k]
                     result.sort()
-                    if result not in self.sum_list[sum(result)]:
+                    if sum(result) >= self.start_sum and sum(result)<= self.end_sum and result not in self.sum_list[sum(result)]:
                         self.sum_list[sum(result)].append(result)
                     for u in range(10):
                         result = [i, j, k, u]
                         result.sort()
-                        if sum(result)<=self.n_classes and result not in self.sum_list[sum(result)]: self.sum_list[sum(result)].append(result)
+                        if sum(result) >= self.start_sum and sum(result)<= self.end_sum and result not in self.sum_list[sum(result)]: self.sum_list[sum(result)].append(result)
                         for v in range(10):
                             result = [i, j, k, u, v]
                             result.sort()
-                            if sum(result)<=self.n_classes and result not in self.sum_list[sum(result)]: self.sum_list[sum(result)].append(result)
+                            if sum(result) >= self.start_sum and sum(result)<= self.end_sum and result not in self.sum_list[sum(result)]: self.sum_list[sum(result)].append(result)
  
     def generate_dataset(self):
         if self.data_exists_flag:
@@ -105,11 +116,11 @@ class CreateUltraMNIST:
         self.get_base_dataset()
  
         print('Preparing storage locations')
-        os.mkdir(self.root_path)
+        os.makedirs(self.root_path,exist_ok=True)
  
         # creating train test and validation folders
-        os.mkdir(os.path.join(self.root_path, 'train'))
-        os.mkdir(os.path.join(self.root_path, 'val'))
+        os.makedirs(os.path.join(self.root_path, 'train'),exist_ok=True)
+        os.makedirs(os.path.join(self.root_path, 'val'),exist_ok=True)
  
         # limiting the sample per class (spc)
         train_spc = int(self.n_samples[0] / self.n_classes)
@@ -157,14 +168,17 @@ class CreateUltraMNIST:
  
             # random sample a resoltion from V-shape distribution
             k = int(np.ceil((self.img_scale_fact[1]-self.img_scale_fact[0])/2))
-            prob = np.array([i for i in range(k, 0, -1)] + [i for i in range(1, k)])
+            prob = [i for i in range(k, 0, -1)] + [i for i in range(1, k)]
+            if k%2==0:
+                prob.append(k)
+            prob = np.array(prob)
             res_fact = np.random.choice(range(self.img_scale_fact[0], self.img_scale_fact[1]), p=prob/prob.sum())
  
             if res_fact == 1 and np.random.rand()<0.5:
                 scaled_simg = sub_img.numpy()
                 scaled_simg = cv2.resize(scaled_simg, (14, 14), interpolation=cv2.INTER_NEAREST)
             else: scaled_simg = np.kron(sub_img, np.ones((res_fact,res_fact)))
- 
+
             # add to img
             sub_len = scaled_simg.shape[0]
             randx = random.randint(0, img.shape[0]-sub_len)
@@ -222,16 +236,23 @@ class CreateUltraMNIST:
  
 if __name__ == '__main__':
  
-    ROOT_DIRECTORY = '../data/ultramnist'
+    ROOT_DIRECTORY = '../data/ultramnist_v5'
+    print(ROOT_DIRECTORY)
     BASE_DATASET = '../data/mnist'
-    SAMPLES_PER_CLASS_TRAIN = 1000
-    SAMPLES_PER_CLASS_VAL = 200
-    N_SAMPLES = 28 * np.array([SAMPLES_PER_CLASS_TRAIN,SAMPLES_PER_CLASS_VAL])
-    IMAGE_SIZE = 4000
+    SAMPLES_PER_CLASS_TRAIN = 1
+    SAMPLES_PER_CLASS_VAL = 1
+    START_SUM = 9
+    END_SUM = 18
+    NUM_CLASSES = END_SUM - START_SUM + 1
+    N_SAMPLES = NUM_CLASSES * np.array([SAMPLES_PER_CLASS_TRAIN,SAMPLES_PER_CLASS_VAL])
+    IMAGE_SIZE = 512
  
     obj_umnist = CreateUltraMNIST(root=ROOT_DIRECTORY,
                                     base_data_path=BASE_DATASET,
+                                    start_sum=START_SUM,
+                                    end_sum = END_SUM,
                                     n_samples = N_SAMPLES,
+                                    num_classes=NUM_CLASSES,
                                     img_size=IMAGE_SIZE)
     obj_umnist.generate_dataset()
 
