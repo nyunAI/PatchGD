@@ -1,19 +1,18 @@
 from timm.optim import create_optimizer_v2, optimizer_kwargs
+from PIL import Image
 from timm.scheduler import create_scheduler
 from timm.loss import BinaryCrossEntropy
 from timm.data.transforms_factory import create_transform
 from timm.data import Mixup
 from timm.data.config import resolve_data_config
-import timm
 import argparse
 import random
 import yaml
 from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from random import seed, shuffle
-from torchvision.datasets.folder import ImageFolder
-from typing import Any, Callable, cast, Dict, List, Optional, Tuple
+from tabnanny import check
+from tracemalloc import start
 import warnings
-from sklearn import metrics
 from tqdm import tqdm
 from torchvision import transforms
 from torch.utils.data import Dataset, DataLoader
@@ -27,23 +26,16 @@ from sklearn.model_selection import KFold
 import numpy as np
 import wandb
 import pathlib
+from sklearn import metrics
 import os
 import time
-from PIL import Image
-from torchvision.models import resnet50
+import timm
+from torchvision.models import resnet18, resnet50
 import matplotlib.pyplot as plt
 from datetime import datetime
 import transformers
+import math
 warnings.filterwarnings('ignore')
-
-
-def seed_everything(seed):
-    np.random.seed(seed)
-    random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
 
 
 config_parser = parser = argparse.ArgumentParser(
@@ -69,9 +61,19 @@ def _parse_args():
     return args, args_text
 
 
+def seed_everything(seed):
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
 def get_lr(optimizer):
+    lrs = []
     for param_group in optimizer.param_groups:
-        return param_group['lr']
+        lrs.append(param_group['lr'])
+    return lrs
 
 
 class IMAGENET100(Dataset):
@@ -168,6 +170,22 @@ def create_loader(
     return loader
 
 
+class PatchDataset(Dataset):
+    def __init__(self, images, num_patches, stride, patch_size):
+        self.images = images
+        self.num_patches = num_patches
+        self.stride = stride
+        self.patch_size = patch_size
+
+    def __len__(self):
+        return self.num_patches ** 2
+
+    def __getitem__(self, choice):
+        i = choice % self.num_patches
+        j = choice//self.num_patches
+        return self.images[:, :, self.stride*i:self.stride*i+self.patch_size, self.stride*j:self.stride*j+self.patch_size], choice
+
+
 def get_metrics(predictions, actual, isTensor=False):
     if isTensor:
         p = predictions.detach().cpu().numpy()
@@ -189,13 +207,13 @@ def get_output_shape(model, image_dim):
 
 
 class Backbone(nn.Module):
-    def __init__(self, args):
+    def __init__(self, args, latent_dim):
         super(Backbone, self).__init__()
         self.encoder = timm.create_model(
             args.model,
             pretrained=args.pretrained,
             in_chans=3,
-            num_classes=NUM_CLASSES,
+            num_classes=latent_dim,
             drop_rate=args.drop,
             drop_path_rate=args.drop_path,
             drop_block_rate=args.drop_block,
@@ -210,49 +228,125 @@ class Backbone(nn.Module):
         return self.encoder(x)
 
 
+class CNN_Block(nn.Module):
+    def __init__(self, latent_dim, num_classes, num_patches):
+        super(CNN_Block, self).__init__()
+        self.expected_dim = (BATCH_SIZE, latent_dim, num_patches, num_patches)
+        self.layer1 = nn.Sequential(
+            nn.Conv2d(latent_dim, latent_dim, 3, 1, 1),
+            nn.ReLU(),
+            nn.BatchNorm2d(latent_dim)
+        )
+        self.layer2 = nn.Sequential(
+            nn.Conv2d(latent_dim, latent_dim, 3, 2, 1),
+            nn.ReLU(),
+            nn.BatchNorm2d(latent_dim)
+        )
+        self.layer3 = nn.Sequential(
+            nn.Conv2d(latent_dim, latent_dim, 3, 2, 1),
+            nn.ReLU(),
+            nn.BatchNorm2d(latent_dim)
+        )
+        self.layer4 = nn.Sequential(
+            nn.Conv2d(latent_dim, latent_dim, 3, 2, 1),
+            nn.ReLU(),
+            nn.BatchNorm2d(latent_dim)
+        )
+        self.dropout = nn.Dropout2d(p=0.2)
+        flatten_dim = self.get_final_out_dimension(self.expected_dim)
+        self.linear = nn.Linear(flatten_dim, num_classes)
+
+    def get_output_shape(self, model, image_dim):
+        return model(torch.rand(*(image_dim))).data.shape
+
+    def get_final_out_dimension(self, shape):
+        s = shape
+        s = self.get_output_shape(self.layer1, s)
+        s = self.get_output_shape(self.layer2, s)
+        s = self.get_output_shape(self.layer3, s)
+        s = self.get_output_shape(self.layer4, s)
+        return np.prod(list(s[1:]))
+
+    def forward(self, x, print_shape=False):
+        x = self.layer1(x)
+        if print_shape:
+            print(x.size())
+        x = self.dropout(x)
+        x = self.layer2(x)
+        if print_shape:
+            print(x.size())
+        x = self.dropout(x)
+        x = self.layer3(x)
+        if print_shape:
+            print(x.size())
+        x = self.dropout(x)
+        x = self.layer4(x)
+        if print_shape:
+            print(x.size())
+        x = x.reshape(x.shape[0], -1)
+        x = self.linear(x)
+        if print_shape:
+            print(x.size())
+        return x
+
+
 if __name__ == "__main__":
 
-    DEVICE_ID = 3
+    DEVICE_ID = 5
     os.environ["CUDA_VISIBLE_DEVICES"] = str(DEVICE_ID)
     now = datetime.now()
     date_time = now.strftime("%d_%m_%Y__%H_%M")
     MAIN_RUN = True
-    CONINUE_FROM_LAST = False
+
     args, args_text = _parse_args()
     # print(args.model)
     args.prefetcher = False
 
-    MONITOR_WANDB = True
-    SAVE_MODELS = MONITOR_WANDB
-    BASELINE = True
+    MONITOR_WANDB = False
     SANITY_CHECK = False
     EPOCHS = 100
-    ACCELARATOR = f'cuda:0' if torch.cuda.is_available() else 'cpu'
+    args.epochs = EPOCHS
+    LEARNING_RATE = 1e-3
+    args.lr = LEARNING_RATE
+    ACCELARATOR = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+    PERCENT_SAMPLING = 1/4
+    GRAD_ACCUM = True
+    BATCH_SIZE = 2048
+    args.batch_size = BATCH_SIZE
+    MEMORY = '48'
+    IMAGE_SIZE = 160
+    args.img_size = IMAGE_SIZE
+    PATCH_SIZE = 40
+    SAVE_MODELS = MONITOR_WANDB
 
-    IMAGE_SIZE = args.img_size
-    BATCH_SIZE = args.batch_size
-    FEATURE = ''
-    MEMORY = 48
-    MODEL_LOAD_DIR = ''
-    RUN_NAME = f'full_100_timm_strategy_scheduler_included_{DEVICE_ID}-{IMAGE_SIZE}-{BATCH_SIZE}-resnet50-baseline-{MEMORY}GB-{FEATURE}-datetime_{date_time}'
+    WARMUP_EPOCHS = 5
+    args.warmup_epochs = WARMUP_EPOCHS
+    EXPERIMENT = "ImageNet100-10" if not SANITY_CHECK else 'imagenet-sanity-gowreesh'
+    PATCH_BATCHES = math.ceil(1/PERCENT_SAMPLING)
+    INNER_ITERATION = PATCH_BATCHES
+    EPSILON = INNER_ITERATION if GRAD_ACCUM else 1
+    FEATURE = f"{'grad_accumulation' if EPSILON == INNER_ITERATION else ''}"
+    RUN_NAME = f'full_100_timm_strategy_patch_gd_{DEVICE_ID}-{IMAGE_SIZE}_{PATCH_SIZE}-{PERCENT_SAMPLING}-bs-{BATCH_SIZE}-resnet50+head-{MEMORY}-{FEATURE}-datetime_{date_time}'
 
+    LEARNING_RATE_BACKBONE = LEARNING_RATE
+    LEARNING_RATE_HEAD = LEARNING_RATE
+    LATENT_DIMENSION = 256
     NUM_CLASSES = 100
     SEED = 42
-    WARMUP_EPOCHS = args.warmup_epochs
+    STRIDE = PATCH_SIZE
+    NUM_PATCHES = ((IMAGE_SIZE-PATCH_SIZE)//STRIDE) + 1
     NUM_WORKERS = 4
     TRAIN_CSV_PATH = './train_100_full.csv'
     VAL_CSV_PATH = './val_100_10_1.csv'
     MEAN = IMAGENET_DEFAULT_MEAN
     STD = IMAGENET_DEFAULT_STD
     SANITY_DATA_LEN = None
-    MODEL_SAVE_DIR = f"./{'models_icml' if MAIN_RUN else 'models'}/{'sanity' if SANITY_CHECK else 'runs'}/{RUN_NAME}"
-    EXPERIMENT = "ImageNet100-10" if not SANITY_CHECK else 'imagenet-sanity-gowreesh'
+    MODEL_SAVE_DIR = f"../{'models_icml' if MAIN_RUN else 'models'}/{'sanity' if SANITY_CHECK else 'runs'}/{RUN_NAME}"
     DECAY_FACTOR = 1
-
-    args.num_classes = NUM_CLASSES
-
-    if SAVE_MODELS:
-        os.makedirs(MODEL_SAVE_DIR, exist_ok=True)
+    VALIDATION_EVERY = 1
+    BASELINE = False
+    CONINUE_FROM_LAST = False
+    MODEL_LOAD_DIR = ''
 
     if MONITOR_WANDB:
         run = wandb.init(project=EXPERIMENT, entity="gowreesh", reinit=True)
@@ -260,30 +354,49 @@ if __name__ == "__main__":
         wandb.run.save()
 
     seed_everything(SEED)
+    if SAVE_MODELS:
+        os.makedirs(MODEL_SAVE_DIR, exist_ok=True)
 
-    model1 = Backbone(args)
+    model1 = Backbone(args, latent_dim=LATENT_DIMENSION)
+    model2 = CNN_Block(LATENT_DIMENSION, NUM_CLASSES, NUM_PATCHES)
+
     model1.to(ACCELARATOR)
     for param in model1.parameters():
         param.requires_grad = True
+
+    model2.to(ACCELARATOR)
+    for param in model2.parameters():
+        param.requires_grad = True
     data_config = resolve_data_config(
         vars(args), model=model1.encoder, verbose=True)
-    print(ACCELARATOR)
+    print(
+        f"Number of patches in one dimenstion: {NUM_PATCHES}, percentage sampling is: {PERCENT_SAMPLING}")
     print(RUN_NAME)
-
-    print(f"Baseline model:")
+    print(ACCELARATOR)
 
     train_loss_fn = BinaryCrossEntropy(
         target_threshold=args.bce_target_thresh).to()
     train_loss_fn = train_loss_fn.to(device=ACCELARATOR)
     validate_loss_fn = nn.CrossEntropyLoss().to(device=ACCELARATOR)
-
+    lrs = {
+        'head': LEARNING_RATE_HEAD,
+        'backbone': LEARNING_RATE_BACKBONE
+    }
+    args.lr = LEARNING_RATE
+    parameters = [{'params': model1.parameters(),
+                   'lr': lrs['backbone']},
+                  {'params': model2.parameters(),
+                   'lr': lrs['head']}]
     # optimizer = optim.Adam(parameters)
     optimizer = create_optimizer_v2(
-        model1,
+        parameters,
         **optimizer_kwargs(cfg=args),
     )
+    # optimizer_backbone = optim.Adam(model1.parameters())
+    # optimizer_head = optim.Adam(model2.parameters())
 
     train_dataset, val_dataset = get_train_val_dataset()
+    args.batch_size = BATCH_SIZE
     train_loader = create_loader(
         train_dataset,
         input_size=data_config['input_size'],
@@ -333,13 +446,6 @@ if __name__ == "__main__":
         pin_memory=args.pin_mem,
     )
 
-    # for i in train_loader:
-    #     print(i[0].shape,i[1].shape)
-    #     break
-
-    # for i in validation_loader:
-    #     print(i[0].shape,i[1].shape)
-    #     break
     print(
         f"Length of train loader: {len(train_loader)},Validation loader: {(len(validation_loader))}")
 
@@ -358,27 +464,37 @@ if __name__ == "__main__":
             num_classes=args.num_classes
         )
     mixup_fn = Mixup(**mixup_args)
-    steps_per_epoch = len(train_dataset)//(BATCH_SIZE)
 
+    steps_per_epoch = len(train_dataset)//(BATCH_SIZE)
     if len(train_dataset) % BATCH_SIZE != 0:
         steps_per_epoch += 1
-    # scheduler = transformers.get_cosine_schedule_with_warmup(optimizer,WARMUP_EPOCHS*steps_per_epoch,DECAY_FACTOR*EPOCHS*steps_per_epoch)
-    scheduler, num_epochs = create_scheduler(
-        args=args,
-        optimizer=optimizer,
-    )
+    scheduler = transformers.get_cosine_schedule_with_warmup(
+        optimizer, WARMUP_EPOCHS*steps_per_epoch, DECAY_FACTOR*EPOCHS*steps_per_epoch)
+
+    # scheduler = transformers.get_cosine_schedule_with_warmup(optimizer,
+    #                                                      num_warmup_steps=WARMUP_EPOCHS*steps_per_epoch,
+    #                                                      num_training_steps=DECAY_FACTOR*EPOCHS*steps_per_epoch)
+
+    # scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer, base_lr=1e-4, max_lr=1e-3,step_size_up=steps_per_epoch//2,mode="triangular",cycle_momentum=False)
+
+    # scheduler_backbone = torch.optim.lr_scheduler.CyclicLR(optimizer_backbone, base_lr=1e-5, max_lr=1e-4,step_size_up=steps_per_epoch//2,mode="triangular",cycle_momentum=False)
+    # scheduler_head = torch.optim.lr_scheduler.CyclicLR(optimizer_head, base_lr=1e-4, max_lr=1e-3,step_size_up=steps_per_epoch//2,mode="triangular",cycle_momentum=False)
+
     if CONINUE_FROM_LAST:
-        checkpoint = torch.load(f"{MODEL_LOAD_DIR}/best_val_accuracy.pt")
+        checkpoint = torch.load(f"{MODEL_LOAD_DIR}/best_val_metric.pt")
         start_epoch = checkpoint['epoch']
         print(
-            f"Model already trained for {start_epoch} epochs on 512 size images.")
-        model1.load_state_dict(checkpoint['model1_weights'])
+            f"Model already trained for {start_epoch} epochs on 2048 size images.")
+        print(checkpoint.keys())
+        print(model1.load_state_dict(checkpoint['model1_weights']))
+        start_epoch = 0
 
     best_validation_loss = float('inf')
     best_validation_accuracy = 0
     best_validation_metric = -float('inf')
 
-    for epoch in range(EPOCHS):
+    start_epoch = 0
+    for epoch in range(start_epoch, EPOCHS):
         print("="*31)
         print(f"{'-'*10} Epoch {epoch+1}/{EPOCHS} {'-'*10}")
 
@@ -396,6 +512,7 @@ if __name__ == "__main__":
         val_labels = np.array([])
 
         model1.train()
+        model2.train()
         print("Train Loop!")
         for images, labels in tqdm(train_loader):
             images = images.to(ACCELARATOR)
@@ -404,42 +521,108 @@ if __name__ == "__main__":
 
             batch_size = labels.shape[0]
             num_train += labels.shape[0]
+
+            # optimizer_backbone.zero_grad()
+            # optimizer_head.zero_grad()
+
+            L1 = torch.zeros(
+                (batch_size, LATENT_DIMENSION, NUM_PATCHES, NUM_PATCHES))
+            L1 = L1.to(ACCELARATOR)
+
+            patch_dataset = PatchDataset(
+                images, NUM_PATCHES, STRIDE, PATCH_SIZE)
+            patch_loader = DataLoader(patch_dataset, batch_size=int(
+                math.ceil(len(patch_dataset)*PERCENT_SAMPLING)), shuffle=True)
+
+            # Initial filling without gradient engine:
+
+            with torch.no_grad():
+                for patches, idxs in patch_loader:
+                    patches = patches.to(ACCELARATOR)
+                    patches = patches.reshape(-1, 3, PATCH_SIZE, PATCH_SIZE)
+                    out = model1(patches)
+                    out = out.reshape(-1, batch_size, LATENT_DIMENSION)
+                    out = torch.permute(out, (1, 2, 0))
+                    row_idx = idxs//NUM_PATCHES
+                    col_idx = idxs % NUM_PATCHES
+                    L1[:, :, row_idx, col_idx] = out
+
+            train_loss_sub_epoch = 0
             optimizer.zero_grad()
-            outputs = model1(images)
-            # if torch.isnan(outputs).any():
-            #     print("output has nan")
-            # print(outputs.shape,labels.shape)
-            # _,preds = torch.max(outputs,1)
-            # import pdb; pdb.set_trace()
-            # train_correct += (preds == labels).sum().item()
-            # correct = (preds == labels).sum().item()
+            for inner_iteration, (patches, idxs) in enumerate(patch_loader):
 
-            # train_metrics_step = get_metrics(preds,labels,True)
-            # train_predictions = np.concatenate((train_predictions,preds.detach().cpu().numpy()))
-            # train_labels = np.concatenate((train_labels,labels.detach().cpu().numpy()))
+                # optimizer_backbone.zero_grad()
+                # optimizer_head.zero_grad()
 
-            loss = train_loss_fn(outputs, labels)
-            l = loss.item()
-            running_loss_train += loss.item()
-            loss.backward()
-            optimizer.step()
+                L1 = L1.detach()
+                patches = patches.to(ACCELARATOR)
+                patches = patches.reshape(-1, 3, PATCH_SIZE, PATCH_SIZE)
+                out = model1(patches)
+                out = out.reshape(-1, batch_size, LATENT_DIMENSION)
+                out = out.permute((1, 2, 0))
+                row_idx = idxs//NUM_PATCHES
+                col_idx = idxs % NUM_PATCHES
+                L1[:, :, row_idx, col_idx] = out
+                outputs = model2(L1)
+                loss = train_loss_fn(outputs, labels)
+                loss = loss/EPSILON
+                loss.backward()
+                train_loss_sub_epoch += loss.item()
+
+                if (inner_iteration + 1) % EPSILON == 0:
+                    optimizer.step()
+                    optimizer.zero_grad()
+
+                # optimizer_backbone.step()
+                # optimizer_head.step()
+
+                if inner_iteration + 1 >= INNER_ITERATION:
+                    break
+            scheduler.step()
+            # scheduler_backbone.step()
+            # scheduler_head.step()
+
+            # Adding all the losses... Can be modified??
+            running_loss_train += train_loss_sub_epoch
+
+            # Using the final L1 to make the final set of predictions for accuracy reporting
+            # with torch.no_grad():
+
+            #     _,preds = torch.max(outputs,1)
+            #     correct = (preds == labels).sum().item()
+            #     train_correct += correct
+
+            #     train_metrics_step = get_metrics(preds,labels,True)
+            #     train_predictions = np.concatenate((train_predictions,preds.detach().cpu().numpy()))
+            #     train_labels = np.concatenate((train_labels,labels.detach().cpu().numpy()))
 
             lr = get_lr(optimizer)
+
+            # lr = get_lr(optimizer_backbone)
+            # lr.extend(get_lr(optimizer_head))
+
+            # if MONITOR_WANDB:
+            #     wandb.log({f"lrs/lr-{ii}":learning_rate for ii,learning_rate in enumerate(lr)})
+            #     wandb.log({
+            #     "train_loss_step":train_loss_sub_epoch/batch_size,
+            #     'epoch':epoch,
+            #     'train_accuracy_step_metric':train_metrics_step['accuracy'],
+            #     'train_kappa_step_metric':train_metrics_step['kappa']})
+
             if MONITOR_WANDB:
                 wandb.log({'lr': lr, "train_loss_step": l /
                           batch_size, 'epoch': epoch, })
-                #    'train_accuracy_step_metric':train_metrics_step['accuracy'],'train_kappa_step_metric':train_metrics_step['kappa']})
+
         # train_metrics = get_metrics(train_predictions,train_labels)
-        print(f"Train Loss: {running_loss_train/num_train}")
+        # print(f"Train Loss: {running_loss_train/num_train} Train Accuracy: {train_correct/num_train}")
         # print(f"Train Accuracy Metric: {train_metrics['accuracy']} Train Kappa Metric: {train_metrics['kappa']}")
-        scheduler.step(epoch+1)
+        print(f"Train Loss: {running_loss_train/num_train}")
 
         # Evaluation Loop!
-        val_accr = 0.0
-        val_lossr = 0.0
-        if (epoch+1) % 1 == 0:
+        if (epoch+1) % VALIDATION_EVERY == 0:
 
             model1.eval()
+            model2.eval()
 
             with torch.no_grad():
                 print("Validation Loop!")
@@ -448,9 +631,29 @@ if __name__ == "__main__":
                     labels = labels.to(ACCELARATOR)
                     batch_size = labels.shape[0]
 
-                    outputs = model1(images)
-                    # if torch.isnan(outputs).any():
-                    #     print("L1 has nan")
+                    patch_dataset = PatchDataset(
+                        images, NUM_PATCHES, STRIDE, PATCH_SIZE)
+                    patch_loader = DataLoader(patch_dataset, int(
+                        len(patch_dataset)*PERCENT_SAMPLING), shuffle=True)
+
+                    L1 = torch.zeros(
+                        (batch_size, LATENT_DIMENSION, NUM_PATCHES, NUM_PATCHES))
+                    L1 = L1.to(ACCELARATOR)
+
+                    # Filling once to get the final set of predictions
+                    with torch.no_grad():
+                        for patches, idxs in patch_loader:
+                            patches = patches.to(ACCELARATOR)
+                            patches = patches.reshape(-1,
+                                                      3, PATCH_SIZE, PATCH_SIZE)
+                            out = model1(patches)
+                            out = out.reshape(-1, batch_size, LATENT_DIMENSION)
+                            out = torch.permute(out, (1, 2, 0))
+                            row_idx = idxs//NUM_PATCHES
+                            col_idx = idxs % NUM_PATCHES
+                            L1[:, :, row_idx, col_idx] = out
+
+                    outputs = model2(L1)
                     num_val += labels.shape[0]
                     _, preds = torch.max(outputs, 1)
                     val_correct += (preds == labels).sum().item()
@@ -466,8 +669,12 @@ if __name__ == "__main__":
                     l = loss.item()
                     running_loss_val += loss.item()
                     if MONITOR_WANDB:
-                        wandb.log({'lr': lr, "val_loss_step": l/batch_size, "epoch": epoch,
-                                  'val_accuracy_step_metric': val_metrics_step['accuracy'], 'val_kappa_step_metric': val_metrics_step['kappa']})
+                        wandb.log({f"lrs/lr-{ii}": learning_rate for ii,
+                                  learning_rate in enumerate(lr)})
+                        wandb.log({'epoch': epoch,
+                                   "val_loss_step": l/batch_size,
+                                   'val_accuracy_step_metric': val_metrics_step['accuracy'],
+                                   'val_kappa_step_metric': val_metrics_step['kappa']})
 
                 val_metrics = get_metrics(val_predictions, val_labels)
                 print(
@@ -480,6 +687,7 @@ if __name__ == "__main__":
                     if SAVE_MODELS:
                         torch.save({
                             'model1_weights': model1.state_dict(),
+                            'model2_weights': model2.state_dict(),
                             'optimizer_state': optimizer.state_dict(),
                             'scheduler_state': scheduler.state_dict(),
                             'epoch': epoch+1,
@@ -490,6 +698,7 @@ if __name__ == "__main__":
                     if SAVE_MODELS:
                         torch.save({
                             'model1_weights': model1.state_dict(),
+                            'model2_weights': model2.state_dict(),
                             'optimizer_state': optimizer.state_dict(),
                             'scheduler_state': scheduler.state_dict(),
                             'epoch': epoch+1,
@@ -500,6 +709,7 @@ if __name__ == "__main__":
                     if SAVE_MODELS:
                         torch.save({
                             'model1_weights': model1.state_dict(),
+                            'model2_weights': model2.state_dict(),
                             'optimizer_state': optimizer.state_dict(),
                             'scheduler_state': scheduler.state_dict(),
                             'epoch': epoch+1,
@@ -520,6 +730,7 @@ if __name__ == "__main__":
         if SAVE_MODELS:
             torch.save({
                 'model1_weights': model1.state_dict(),
+                'model2_weights': model2.state_dict(),
                 'optimizer_state': optimizer.state_dict(),
                 'scheduler_state': scheduler.state_dict(),
                 'epoch': epoch+1,
