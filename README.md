@@ -1,12 +1,12 @@
 <div align="center">
 
-<h2><a href="https://openreview.net/forum?id=6dS1jhdemD/">Pushing the Limits of Gradient Descent for Efficient Learning on Large Images</a></h2>
+<h2><a href="https://openreview.net/forum?id=6dS1jhdemD">Pushing the Limits of Gradient Descent for Efficient Learning on Large Images</a></h2>
 
 [Deepak Gupta](https://dkgupta90.github.io/), [Gowreesh Mago](https://scholar.google.com/citations?user=ewFlY0gAAAAJ&hl=en), [Arnav Chavan](https://sites.google.com/view/arnavchavan/), [Dilip Prasad](https://en.uit.no/ansatte/person?p_document_id=615677), [Rajat Mani Thomas](https://scholar.google.nl/citations?user=gw2bllMAAAAJ&hl=en)
 
 </div>
 
-## Accepted in TMLR [OpenReview](https://openreview.net/forum?id=6dS1jhdemD)
+## :fire:Accepted in TMLR (08/2024) [OpenReview](https://openreview.net/forum?id=6dS1jhdemD)
 
 ### Abstract
 
